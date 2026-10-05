@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         企鹅预设消息
 // @namespace    https://github.com/Civinar-Riley/discord-penguin-preset-messages
-// @version      0.1.5
+// @version      0.1.6
 // @description  把预设消息填进你自己的输入框，无需机器人、无需服务器权限
 // @author       企鹅预设消息
 // @match        https://discord.com/*
@@ -181,6 +181,21 @@
     return editor.textContent || '';
   }
 
+  // 模拟真实打字的 textInput 事件：Discord 的编辑器在这条事件上把文字收进
+  // 自己的模型并 preventDefault（老版 Slate/react 的输入管线），模型与 DOM
+  // 保持一致——能发送、能删除、发送后清空。execCommand 一族对 Discord 的
+  // 模型完全不可见（文字看得见却发不出去也删不掉），不能作为填入手段。
+  // Chrome 禁止构造 TextEvent，用 InputEvent 携带同名事件与 data。
+  function textInsert(editor, text) {
+    try {
+      return editor.dispatchEvent(new InputEvent('textInput', { bubbles: true, cancelable: true, data: text }));
+    } catch (_) {
+      return false;
+    }
+  }
+
+  // 合成 paste：Discord 的剪贴板管线会把文字收进模型（可发送），但浏览器
+  // 可能附带一次原生 DOM 插入，留下模型之外的残留文本。作为 textInput 的兜底。
   function pasteInsert(editor, text) {
     let data;
     try {
@@ -198,52 +213,23 @@
     return editor.dispatchEvent(event);
   }
 
-  function execInsert(editor, text) {
-    try {
-      return document.execCommand('insertText', false, text);
-    } catch (_) {
-      return false;
-    }
-  }
-
-  function lineInsert(editor, text) {
-    const lines = text.split('\n');
-    let inserted = 0;
-    for (let i = 0; i < lines.length; i++) {
-      if (i) {
-        try {
-          document.execCommand('insertText', false, '\n');
-        } catch (_) {}
-      }
-      if (lines[i]) {
-        try {
-          document.execCommand('insertText', false, lines[i]);
-          inserted++;
-        } catch (_) {}
-      }
-    }
-    return inserted > 0;
-  }
-
   // 返回 { ok, via, reason }
-  function insertIntoInput(text) {
+  async function insertIntoInput(text) {
     const editor = findEditor();
     if (!editor) return { ok: false, reason: 'no-editor' };
 
-    // 首选 execCommand：它走 beforeinput 事件，和真实打字同一条管线，Discord 的
-    // Slate 编辑器会在 beforeinput 里把文字收进自己的模型——发送后清空、退格
-    // 删除都正常。合成 paste 会被浏览器按原生粘贴直接改 DOM，编辑器模型不知情，
-    // 发送后 DOM 里会留下删不掉的「幽灵文字」（刷新才消失），只作兜底。
     const before = editorText(editor);
     const grew = () => editorText(editor).length > before.length;
 
     editor.focus();
     caretToEnd(editor);
-    if (execInsert(editor, text) && grew()) return { ok: true, via: 'exec' };
-
-    editor.focus();
-    caretToEnd(editor);
-    if (lineInsert(editor, text) && grew()) return { ok: true, via: 'line' };
+    if (textInsert(editor, text)) {
+      // 编辑器收下文字后经自身渲染才反映到 DOM，立即读可能还没变化，
+      // 给一帧宽限再判定，避免误判失败后用 paste 再插一遍造成重复
+      if (grew()) return { ok: true, via: 'textInput' };
+      await new Promise((resolve) => setTimeout(resolve, 60));
+      if (grew()) return { ok: true, via: 'textInput' };
+    }
 
     editor.focus();
     caretToEnd(editor);
@@ -685,12 +671,12 @@
 
   /* ---------- 填入 ---------- */
 
-  function applyPreset(index, pos) {
+  async function applyPreset(index, pos) {
     const preset = loadPresets()[index];
     if (!preset) return;
     if (typeof pos === 'number') state.cursor = pos;
 
-    const result = insertIntoInput(composeMessage(preset));
+    const result = await insertIntoInput(composeMessage(preset));
     closePanel();
 
     if (result.ok) {
