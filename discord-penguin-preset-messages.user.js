@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         企鹅预设消息
 // @namespace    https://github.com/Civinar-Riley/discord-penguin-preset-messages
-// @version      0.1.2
+// @version      0.1.3
 // @description  把预设消息填进你自己的输入框，无需机器人、无需服务器权限
 // @author       企鹅预设消息
 // @match        https://discord.com/*
@@ -846,6 +846,20 @@
       if (item) applyPreset(Number(item.dataset.idx), Number(item.dataset.pos));
     }
   });
+
+  // 鼠标/指针事件同样对页面隐身：Discord 在 document 冒泡阶段看到点击落在
+  // 「不可编辑」的宿主元素上时，会把焦点抢回自己的消息输入框——表单里点击
+  // 「内容」「附件链接」框就是这样被抢的（名称框靠自动聚焦侥幸绕过）。
+  // 拦截放在根元素冒泡阶段：自己的监听（点击委托、列表悬停）位置都更靠内，
+  // 此时已执行完毕；拦截不取消默认动作，聚焦与文本编辑不受影响。
+  // 例外：悬浮球自己的按下/拖拽/单击判定挂在 window 上（mouseup 需要能到达
+  // window），所以目标为球的事件放行。
+  for (const type of ['pointerdown', 'pointerup', 'mousedown', 'mouseup', 'click', 'dblclick', 'auxclick', 'contextmenu']) {
+    root.addEventListener(type, (event) => {
+      if (event.target === ball) return;
+      event.stopPropagation();
+    });
+  }
 
   search.addEventListener('input', () => {
     state.query = search.value;
