@@ -4,6 +4,12 @@
 
 脚本头 `@version`、本文件的条目、GitHub Release tag 三处必须一致，由 `scripts/verify.mjs` 校验。
 
+## [0.1.4] - 2026-10-05
+
+### 修复
+
+- 面板输入框里复制粘贴失效：Ctrl+V / Ctrl+C 的按键虽已对页面隐身，但浏览器随后派发的 `paste` / `copy` / `cut` 事件会冒泡出 shadow 树、被 Discord 的剪贴板监听 cancel 掉；现把剪辑事件与拖放（`drop` / `dragover`）也在 `window` 捕获阶段对页面隐身，粘贴、复制、剪切、拖入文本照常生效
+
 ## [0.1.3] - 2026-10-05
 
 ### 修复

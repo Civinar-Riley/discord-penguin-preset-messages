@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         企鹅预设消息
 // @namespace    https://github.com/Civinar-Riley/discord-penguin-preset-messages
-// @version      0.1.3
+// @version      0.1.4
 // @description  把预设消息填进你自己的输入框，无需机器人、无需服务器权限
 // @author       企鹅预设消息
 // @match        https://discord.com/*
@@ -993,6 +993,22 @@
 
   // keyup / keypress 同样对页面隐身，避免页面侧收到「只有一半」的按键序列
   for (const type of ['keyup', 'keypress']) {
+    window.addEventListener(
+      type,
+      (event) => {
+        if (state.open && event.target === host) event.stopImmediatePropagation();
+      },
+      true,
+    );
+  }
+
+  // 剪辑事件也要在 window 捕获阶段对页面隐身：Ctrl+V / Ctrl+C 的 keydown 虽已
+  // 被拦，但浏览器随后派发的 paste / copy / cut 事件会冒泡出 shadow 树，Discord
+  // 的 document 级剪贴板监听会 cancel 掉不发生在自己编辑器里的这些事件，导致
+  // 面板输入框里复制粘贴失效。拖放进输入框的 drop / dragover 同理。拦截只断传播
+  // 不 cancel，浏览器对接收框的插入 / 写剪贴板照常执行；自己给 Discord 编辑器
+  // 派发的合成 paste 目标不是宿主，不受影响。
+  for (const type of ['paste', 'copy', 'cut', 'drop', 'dragover']) {
     window.addEventListener(
       type,
       (event) => {
