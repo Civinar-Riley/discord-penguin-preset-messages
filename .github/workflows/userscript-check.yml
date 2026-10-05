@@ -1,0 +1,27 @@
+name: 仓库自检
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  check:
+    name: 语法 / 元信息头 / 解耦
+    runs-on: ubuntu-latest
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 安装 Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: JavaScript 语法校验
+        run: node --check discord-penguin-preset-messages.user.js
+
+      - name: 元信息头 / 版本一致性 / 解耦校验
+        run: node scripts/verify.mjs

@@ -1,0 +1,41 @@
+name: 功能建议
+about: 建议新增功能
+labels: [enhancement]
+
+body:
+  - type: markdown
+    attributes:
+      value: |
+        本脚本刻意保持单文件、纯本地、零网络请求。
+
+        如果你的建议需要网络请求、自动发送或账号自动化，请先读 README 的
+        「🚫 不做」一栏和「隐私与合规」一节——那几条是不可协商的边界。
+
+  - type: textarea
+    id: need
+    attributes:
+      label: 你想解决什么问题
+      description: 描述场景，不要只说「我想要一个 X 按钮」。
+    validations:
+      required: true
+
+  - type: textarea
+    id: why
+    attributes:
+      label: 为什么现有功能凑合不了
+      description: 现有能力：搜索速选 / 管理增删改查 / JSON 导入导出 / 悬浮球拖动 / Alt+P
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: 你的方案
+      description: 具体一点更好评估
+
+  - type: checkboxes
+    id: willingness
+    attributes:
+      label: 我愿意
+      options:
+        - label: 自己提 PR 实现

@@ -1,0 +1,9 @@
+blank_issues_enabled: false
+
+contact_links:
+  - name: 安装问题 / 故障排查
+    url: https://github.com/Civinar-Riley/discord-penguin-preset-messages#故障排除
+    about: 常见问题先在这里查，多数情况不用开 issue。
+  - name: 安装步骤
+    url: https://github.com/Civinar-Riley/discord-penguin-preset-messages#安装
+    about: 不确定怎么装的话，从这里开始。

@@ -1,0 +1,69 @@
+name: Bug 报告
+about: 脚本不工作、报错或行为不符合预期
+labels: [bug]
+
+body:
+  - type: markdown
+    attributes:
+      value: |
+        提交前请先看 README 的「故障排除」一节，多数问题在那里有答案。
+        下面几项缺失会导致 issue 被搁置，因为没法复现。
+
+  - type: input
+    id: browser
+    attributes:
+      label: 浏览器与版本
+      description: 例如 Chrome 141.0
+      placeholder: Chrome 141.0
+    validations:
+      required: true
+
+  - type: input
+    id: manager
+    attributes:
+      label: 油猴管理器与版本
+      description: 管理器名称 + 版本
+      placeholder: Tampermonkey 5.3.0
+    validations:
+      required: true
+
+  - type: dropdown
+    id: platform
+    attributes:
+      label: 客户端形态
+      description: 本脚本仅支持网页版
+      options:
+        - discord.com 网页版
+        - 桌面客户端（不受支持）
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: 预期行为
+      description: 你希望发生什么？
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: 实际行为
+      description: 实际发生了什么？
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: 最小复现步骤
+      description: 1. 做什么 2. 做什么 3. 出现什么
+    validations:
+      required: true
+
+  - type: textarea
+    id: console
+    attributes:
+      label: 控制台报错
+      description: 按 F12 打开 Console，把红色报错贴过来。没有就写「无」。
