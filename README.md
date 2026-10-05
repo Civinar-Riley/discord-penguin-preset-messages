@@ -240,5 +240,3 @@ node scripts/verify.mjs
 [PolyForm Noncommercial License 1.0.0](LICENSE) · Copyright (c) 2026 Civinar-Riley
 
 可以用、可以修改、可以非商业分发。**商业使用不在许可范围内。** 该许可附带显式专利授权与专利报复条款。
-
-> 带 NC 的许可不是 OSI 认可的开源许可。这是本项目的有意选择：如果日后出商业版本，本项目保留那部分权利。
