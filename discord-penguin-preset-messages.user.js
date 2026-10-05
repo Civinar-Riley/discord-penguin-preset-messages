@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         企鹅预设消息
 // @namespace    https://github.com/Civinar-Riley/discord-penguin-preset-messages
-// @version      0.1.4
+// @version      0.1.5
 // @description  把预设消息填进你自己的输入框，无需机器人、无需服务器权限
 // @author       企鹅预设消息
 // @match        https://discord.com/*
@@ -230,12 +230,12 @@
     const editor = findEditor();
     if (!editor) return { ok: false, reason: 'no-editor' };
 
+    // 首选 execCommand：它走 beforeinput 事件，和真实打字同一条管线，Discord 的
+    // Slate 编辑器会在 beforeinput 里把文字收进自己的模型——发送后清空、退格
+    // 删除都正常。合成 paste 会被浏览器按原生粘贴直接改 DOM，编辑器模型不知情，
+    // 发送后 DOM 里会留下删不掉的「幽灵文字」（刷新才消失），只作兜底。
     const before = editorText(editor);
     const grew = () => editorText(editor).length > before.length;
-
-    editor.focus();
-    caretToEnd(editor);
-    if (pasteInsert(editor, text) && grew()) return { ok: true, via: 'paste' };
 
     editor.focus();
     caretToEnd(editor);
@@ -244,6 +244,10 @@
     editor.focus();
     caretToEnd(editor);
     if (lineInsert(editor, text) && grew()) return { ok: true, via: 'line' };
+
+    editor.focus();
+    caretToEnd(editor);
+    if (pasteInsert(editor, text) && grew()) return { ok: true, via: 'paste' };
 
     return { ok: false, reason: 'insert-failed' };
   }
