@@ -263,9 +263,9 @@ discord-penguin-preset-messages/
 - [x] GitHub 上建仓库 `discord-penguin-preset-messages`，设为 public
 - [x] 填 About 栏（第八节文案已上线）
 - [x] 推送到 `main`，CI 自检通过
-- [ ] 填 topics：`userscript` `tampermonkey` `violentmonkey` `discord` `discord-web` `productivity` `chinese`
-- [ ] 打 `v0.1.0` tag 并发布 Release —— README 的 Release 徽章和 Star History 图依赖它
-- [ ] 打开 Settings → Security advisories 的 **Private vulnerability reporting**（`SECURITY.md` 推荐的上报方式依赖它；`SECURITY.md` 里没有联系邮箱，全靠这个入口兜住）
+- [x] 填 topics：`userscript` `tampermonkey` `violentmonkey` `discord` `discord-web` `productivity` `chinese`（2026-10-05 已由 REST API 完成）
+- [x] 打 `v0.1.0` tag 并发布 Release（2026-10-05 已完成，tag 指向 `main` 最新提交，说明文字取自 CHANGELOG 的 0.1.0 条目）
+- [x] 打开 Settings → Security advisories 的 **Private vulnerability reporting**（2026-10-05 已开启，`GET /private-vulnerability-reporting` 返回 `enabled: true`）
 - [ ] 如果想收赞助，再加 `FUNDING.yml`（目前没加，计划里属「可选」档）
 
 ## 十八、LICENSE 署名位置的决定（已定，实测得出）
