@@ -1,6 +1,6 @@
 # 计划 · 企鹅预设消息（Discord 网页版油猴脚本）
 
-> 状态：已定稿 · 起草 2026-10-05 · 修订 2026-10-05（解耦 + 仓库规范化 + 许可选定）
+> 状态：已定稿 · 起草 2026-10-05 · 修订 2026-10-05（解耦 + 仓库规范化 + 许可选定 + 仓库已上线 + LICENSE 署名位置实测）
 > 形态：Tampermonkey 用户脚本，单文件交付，独立开源仓库
 > 仓库：<https://github.com/Civinar-Riley/discord-penguin-preset-messages>
 > 油猴显示名（`@name`）：**企鹅预设消息**
@@ -260,15 +260,29 @@ discord-penguin-preset-messages/
 
 ## 十七、仓库初始化遗留项（需要你操作）
 
-- [ ] GitHub 上建仓库 `discord-penguin-preset-messages`，设为 public
-- [ ] 填 About 栏（见第八节）和 topics：`userscript` `tampermonkey` `violentmonkey` `discord` `discord-web` `productivity` `chinese`
-- [ ] 推送到 `main`，CI 会跑第一条自检
-- [ ] 打 `v0.1.0` tag 并发布 Release，让 README 的 Release 徽章有值
-- [ ] 打开 Settings → Security advisories 的 **Private vulnerability reporting**（`SECURITY.md` 依赖它）
+- [x] GitHub 上建仓库 `discord-penguin-preset-messages`，设为 public
+- [x] 填 About 栏（第八节文案已上线）
+- [x] 推送到 `main`，CI 自检通过
+- [ ] 填 topics：`userscript` `tampermonkey` `violentmonkey` `discord` `discord-web` `productivity` `chinese`
+- [ ] 打 `v0.1.0` tag 并发布 Release —— README 的 Release 徽章和 Star History 图依赖它
+- [ ] 打开 Settings → Security advisories 的 **Private vulnerability reporting**（`SECURITY.md` 推荐的上报方式依赖它；`SECURITY.md` 里没有联系邮箱，全靠这个入口兜住）
 - [ ] 如果想收赞助，再加 `FUNDING.yml`（目前没加，计划里属「可选」档）
-- [ ] LICENSE 里的权利人：需要你自己确认 `Civinar-Riley` 对应的实体名。当前 LICENSE 是官方原文未改，**没有**写入任何 `Required Notice:` 行 —— PolyForm 的 `Notices` 一节允许授权方附加以 `Required Notice:` 开头的行，加上能明确署名，例如：
 
-  ```
-  Required Notice: Copyright (c) 2026 Civinar-Riley
-  ```
+## 十八、LICENSE 署名位置的决定（已定，实测得出）
+
+LICENSE **保持官方原文逐字一致**，不附加 `Required Notice:` 行。版权署名写在 README 的「许可」一节：
+
+```
+[PolyForm Noncommercial License 1.0.0](LICENSE) · Copyright (c) 2026 Civinar-Riley
+```
+
+实测依据：LICENSE 顶部加上 `Required Notice: Copyright (c) 2026 Civinar-Riley` 两行后，GitHub 侧栏**不**显示许可名称，只把它当普通文件链接；去掉这两行、还原官方原文后，侧栏立即显示 `License: PolyForm Noncommercial License 1.0.0` 并出现 `View license` 入口。
+
+取舍结论：LICENSE 的官方原文纯净度值得换取徽章识别。理由 ——
+
+- `Required Notice:` 行合法但不必要。PolyForm 的 `Copyright License` 一节本身就授予「作者对作品持有的版权许可」，效力不依赖 LICENSE 文件里有没有署名行；美国版权法下版权登记也**不要求**版权标注，标注只影响侵权的推定，不影响权利归属。
+- README 顶部的 shields 徽章与「许可」一节的署名，是访客实际会看的地方，比 LICENSE 首行更醒目。
+- LICENSE 保持官方原文还有个附带好处：任何人可以直接拿去套用在其他项目上，不需要先删掉别人的署名。
+
+唯一残留风险：想确认 `Civinar-Riley` 对应的法律实体名（个人 / 公司 / 工作室），这只有你能定。目前署的是 GitHub handle，与仓库归属一致，够用。
 
