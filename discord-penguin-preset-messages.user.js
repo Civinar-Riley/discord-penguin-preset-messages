@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         企鹅预设消息
 // @namespace    https://github.com/Civinar-Riley/discord-penguin-preset-messages
-// @version      0.1.1
+// @version      0.1.2
 // @description  把预设消息填进你自己的输入框，无需机器人、无需服务器权限
 // @author       企鹅预设消息
 // @match        https://discord.com/*
@@ -711,7 +711,8 @@
     search.hidden = state.mode !== 'quick';
     adminButton.hidden = state.mode !== 'quick';
     backButton.hidden = state.mode === 'quick';
-    if (document.activeElement !== search) search.value = state.query;
+    // closed shadow DOM 下 document.activeElement 只会是宿主元素，须查 shadow 根内部的焦点
+    if (root.activeElement !== search) search.value = state.query;
   }
 
   function renderBody() {
@@ -917,8 +918,15 @@
     }
   });
 
-  // 快捷键
-  document.addEventListener(
+  // 键盘处理（window 捕获阶段，先于页面在任何节点上注册的 keydown 监听）
+  //
+  // 面板是 closed shadow DOM：面板内部产生按键时，页面侧看到的 target 是宿主元素，
+  // document.activeElement 也只会是宿主——Discord 据此判定「用户没在输入」，会在
+  // document 捕获阶段把焦点抢到自己的消息输入框，字符全跑那边去。所以在 window
+  // 捕获阶段把面板内部的按键就地拦下（stopPropagation 不取消默认行为，文字照常
+  // 进面板的输入框），Discord 完全看不到。面板自身的按键逻辑也必须挂在这里：
+  // 被拦下的按键不会再到达 document。
+  window.addEventListener(
     'keydown',
     (event) => {
       if (event.altKey && !event.ctrlKey && !event.metaKey && event.code === 'KeyP') {
@@ -929,6 +937,11 @@
       }
 
       if (!state.open) return;
+
+      if (event.target === host) event.stopImmediatePropagation();
+
+      // 输入法组词中的按键（key 为 'Process'）不当作面板快捷键，回车选词不能误触发填入
+      if (event.isComposing || event.key === 'Process') return;
 
       if (event.key === 'Escape') {
         event.preventDefault();
@@ -948,7 +961,7 @@
         return;
       }
 
-      if (state.mode !== 'quick' || document.activeElement !== search) return;
+      if (state.mode !== 'quick' || root.activeElement !== search) return;
 
       if (event.key === 'ArrowDown') {
         event.preventDefault();
@@ -963,6 +976,17 @@
     },
     true,
   );
+
+  // keyup / keypress 同样对页面隐身，避免页面侧收到「只有一半」的按键序列
+  for (const type of ['keyup', 'keypress']) {
+    window.addEventListener(
+      type,
+      (event) => {
+        if (state.open && event.target === host) event.stopImmediatePropagation();
+      },
+      true,
+    );
+  }
 
   // 窗口缩小后球可能落在界外，缩放时重新钳制
   window.addEventListener('resize', () => {
