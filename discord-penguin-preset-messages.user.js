@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         企鹅预设消息
 // @namespace    https://github.com/Civinar-Riley/discord-penguin-preset-messages
-// @version      0.1.0
+// @version      0.1.1
 // @description  把预设消息填进你自己的输入框，无需机器人、无需服务器权限
 // @author       企鹅预设消息
 // @match        https://discord.com/*
@@ -789,7 +789,7 @@
       renderBody();
     },
     back: () => {
-      state.mode = 'admin';
+      state.mode = state.mode === 'admin' ? 'quick' : 'admin';
       state.editing = null;
       refreshChrome();
       renderBody();
@@ -827,7 +827,8 @@
     save: saveForm,
   };
 
-  body.addEventListener('click', (event) => {
+  // 委托绑在 panel 上：顶栏（管理/返回/关闭）和内容区的按钮都要能收到
+  panel.addEventListener('click', (event) => {
     if (event.target.matches('input[type="file"]')) return;
 
     const actionEl = event.target.closest('[data-action]');
@@ -869,6 +870,24 @@
   );
 
   // 悬浮球：拖动记忆位置，单击呼出面板
+  // 位置一律钳制在视口内：拖拽、恢复、窗口缩放都不允许把球移出屏幕
+  function clampBall(x, y) {
+    const maxX = Math.max(0, window.innerWidth - ball.offsetWidth);
+    const maxY = Math.max(0, window.innerHeight - ball.offsetHeight);
+    return {
+      x: Math.min(Math.max(x, 0), maxX),
+      y: Math.min(Math.max(y, 0), maxY),
+    };
+  }
+
+  function placeBall(x, y) {
+    const pos = clampBall(x, y);
+    ball.style.left = pos.x + 'px';
+    ball.style.top = pos.y + 'px';
+    ball.style.right = 'auto';
+    ball.style.bottom = 'auto';
+  }
+
   let drag = null;
 
   ball.addEventListener('mousedown', (event) => {
@@ -883,10 +902,7 @@
     const dx = event.clientX - drag.startX;
     const dy = event.clientY - drag.startY;
     if (Math.abs(dx) > 4 || Math.abs(dy) > 4) drag.moved = true;
-    ball.style.left = drag.originX + dx + 'px';
-    ball.style.top = drag.originY + dy + 'px';
-    ball.style.right = 'auto';
-    ball.style.bottom = 'auto';
+    placeBall(drag.originX + dx, drag.originY + dy);
   });
 
   window.addEventListener('mouseup', () => {
@@ -948,13 +964,16 @@
     true,
   );
 
+  // 窗口缩小后球可能落在界外，缩放时重新钳制
+  window.addEventListener('resize', () => {
+    const rect = ball.getBoundingClientRect();
+    placeBall(rect.left, rect.top);
+  });
+
   /* ---------- 初始化 ---------- */
 
   const savedPos = store.read(BALL_POS_KEY, null);
   if (savedPos && typeof savedPos.x === 'number' && typeof savedPos.y === 'number') {
-    ball.style.left = savedPos.x + 'px';
-    ball.style.top = savedPos.y + 'px';
-    ball.style.right = 'auto';
-    ball.style.bottom = 'auto';
+    placeBall(savedPos.x, savedPos.y);
   }
 })();
