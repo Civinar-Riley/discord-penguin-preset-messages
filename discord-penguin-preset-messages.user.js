@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         企鹅预设消息
 // @namespace    https://github.com/Civinar-Riley/discord-penguin-preset-messages
-// @version      0.1.6
+// @version      0.2.0
 // @description  把预设消息填进你自己的输入框，无需机器人、无需服务器权限
 // @author       企鹅预设消息
 // @match        https://discord.com/*
@@ -25,11 +25,15 @@
 
   const STORE_KEY = 'penguin-preset-messages:presets';
   const BALL_POS_KEY = 'penguin-preset-messages:ball-pos';
+  const GROUP_FILTER_KEY = 'penguin-preset-messages:group-filter';
+  // 速选「未分组」筛选的固定值（带双下划线前缀，避免与用户分组名冲突）
+  const UNGROUPED = '__ungrouped__';
 
   const LIMITS = Object.freeze({
     nameMax: 32,
     contentMax: 2000,
     attachmentMax: 10,
+    groupMax: 16,
   });
 
   // Discord 网页版的消息输入框（Slate 编辑器）
@@ -104,9 +108,17 @@
       attachments = item.attachments;
     }
 
+    let group;
+    if (typeof item.group === 'string') {
+      const cleaned = item.group.trim().slice(0, LIMITS.groupMax);
+      if (cleaned) group = cleaned;
+    }
+
     if (taken.has(name)) return 'duplicate';
     taken.add(name);
-    return { name, content, attachments };
+    const preset = { name, content, attachments };
+    if (group) preset.group = group;
+    return preset;
   }
 
   function importPresets(text) {
@@ -254,7 +266,7 @@
   const FONT = "-apple-system, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif";
 
   const CSS = `
-    :host { all: initial; }
+    :host { all: initial; color-scheme: dark; }
     * { box-sizing: border-box; margin: 0; padding: 0; }
 
     .ball {
@@ -286,6 +298,14 @@
 
     .search { flex: 1; min-width: 0; padding: 7px 10px; border-radius: 6px; border: 1px solid #3f4147; background: #1e1f22; color: #dbdee1; outline: none; font: inherit; }
     .search:focus { border-color: #5865f2; }
+
+    .group-select {
+      flex: 0 1 auto; min-width: 0; max-width: 112px;
+      padding: 7px 8px; border-radius: 6px; border: 1px solid #3f4147;
+      background: #1e1f22; color: #dbdee1; outline: none; font: inherit;
+      text-overflow: ellipsis; cursor: pointer;
+    }
+    .group-select:focus { border-color: #5865f2; }
 
     .btn { padding: 6px 10px; border-radius: 6px; border: 1px solid #3f4147; background: #2b2d31; color: #dbdee1; cursor: pointer; font: inherit; white-space: nowrap; }
     .btn:hover { background: #35373c; }
@@ -366,6 +386,12 @@
   search.spellcheck = false;
   bar.appendChild(search);
 
+  const groupSelect = document.createElement('select');
+  groupSelect.className = 'group-select';
+  groupSelect.hidden = true;
+  groupSelect.title = '按分组筛选';
+  bar.appendChild(groupSelect);
+
   const adminButton = document.createElement('button');
   adminButton.className = 'btn';
   adminButton.type = 'button';
@@ -440,16 +466,24 @@
     mode: 'quick', // quick | admin | form | import
     editing: null, // 'new' | 索引字符串 | null
     query: '',
+    groupFilter: '', // '' = 全部；UNGROUPED = 未分组；其余为分组名
     cursor: 0,
     filtered: [],
   };
 
   /* ---------- 速选列表 ---------- */
 
+  function matchesGroupFilter(preset) {
+    if (!state.groupFilter) return true;
+    if (state.groupFilter === UNGROUPED) return !preset.group;
+    return preset.group === state.groupFilter;
+  }
+
   function quickHTML(presets) {
     const query = state.query.trim().toLowerCase();
     state.filtered = presets
       .map((preset, index) => ({ preset, index }))
+      .filter(({ preset }) => matchesGroupFilter(preset))
       .filter(
         ({ preset }) =>
           !query ||
@@ -492,7 +526,7 @@
       .map((preset, index) => {
         const count = Array.isArray(preset.attachments) ? preset.attachments.length : 0;
         return `<div class="item">
-          <div class="item-name">${esc(preset.name)}</div>
+          <div class="item-name">${esc(preset.name)}${preset.group ? `<span class="kbd">${esc(preset.group)}</span>` : ''}</div>
           <div class="item-preview">${esc(oneLine(preset.content, 60))}</div>
           <div class="row" style="margin-top:6px">
             <button class="btn" type="button" data-action="edit" data-idx="${index}">编辑</button>
@@ -521,12 +555,33 @@
     const preset = isEdit ? presets[index] || { name: '', content: '', attachments: [] } : { name: '', content: '', attachments: [] };
     const heading = isEdit ? `编辑预设 · ${index + 1} / ${presets.length}` : '新增预设';
     const attachText = (preset.attachments || []).join('\n');
+    const groups = deriveGroups(presets);
+    const currentGroup = typeof preset.group === 'string' ? preset.group : '';
+    if (currentGroup && !groups.includes(currentGroup)) groups.push(currentGroup);
+    const groupOptionsHTML = ['']
+      .concat(groups)
+      .map(
+        (group) =>
+          `<option value="${esc(group)}"${group === currentGroup ? ' selected' : ''}>${group ? esc(group) : '未分组'}</option>`,
+      )
+      .concat('<option value="__new__">➕ 新建分组…</option>')
+      .join('');
 
     return `<div class="form">
       <div class="row"><span class="title">${esc(heading)}</span></div>
       <div class="field">
         <span class="label">名称（${LIMITS.nameMax} 字以内，唯一）</span>
         <input class="input" type="text" data-field="name" maxlength="${LIMITS.nameMax}" value="${esc(preset.name)}" placeholder="例如：入服须知" spellcheck="false">
+      </div>
+      <div class="field">
+        <span class="label">分组（可选，最长 ${LIMITS.groupMax} 字）</span>
+        <div class="row">
+          <select class="input" data-field="group" style="flex:1;min-width:0">
+            ${groupOptionsHTML}
+          </select>
+          <input class="input" type="text" data-field="group-new" maxlength="${LIMITS.groupMax}" placeholder="新分组名称" spellcheck="false" style="flex:1;min-width:0;display:none">
+          <button class="btn" type="button" data-action="group-toggle" title="改选已有分组" style="display:none">▾</button>
+        </div>
       </div>
       <div class="field">
         <span class="label">内容（${LIMITS.contentMax} 字以内，支持换行）</span>
@@ -570,6 +625,16 @@
       .split('\n')
       .map((line) => line.trim())
       .filter(Boolean);
+    const groupSelectField = body.querySelector('[data-field="group"]');
+    const groupNewInput = body.querySelector('[data-field="group-new"]');
+    let group = '';
+    if (groupSelectField) {
+      if (groupNewInput && groupNewInput.style.display !== 'none') {
+        group = groupNewInput.value.trim().slice(0, LIMITS.groupMax);
+      } else if (groupSelectField.value !== '__new__') {
+        group = groupSelectField.value.trim().slice(0, LIMITS.groupMax);
+      }
+    }
 
     if (!name) return setFieldError('名称不能为空');
     if (name.length > LIMITS.nameMax) return setFieldError(`名称最多 ${LIMITS.nameMax} 字`);
@@ -587,6 +652,7 @@
 
     const item = { name, content };
     if (attachments.length) item.attachments = attachments;
+    if (group) item.group = group;
 
     if (editingIndex < 0) list.push(item);
     else list[editingIndex] = item;
@@ -690,6 +756,15 @@
 
   /* ---------- 渲染 ---------- */
 
+  // 从预设列表推导分组名（首现顺序）；分组不单独存储，删光组内预设即消失
+  function deriveGroups(presets) {
+    const groups = [];
+    for (const preset of presets) {
+      if (preset.group && !groups.includes(preset.group)) groups.push(preset.group);
+    }
+    return groups;
+  }
+
   function refreshChrome() {
     const titles = {
       quick: '企鹅预设消息',
@@ -703,6 +778,41 @@
     backButton.hidden = state.mode === 'quick';
     // closed shadow DOM 下 document.activeElement 只会是宿主元素，须查 shadow 根内部的焦点
     if (root.activeElement !== search) search.value = state.query;
+
+    // 分组筛选下拉：仅速选模式且存在分组时显示；选中的分组失效（被删空）时回落「全部」
+    const presets = loadPresets();
+    const groups = deriveGroups(presets);
+    const hasGroups = groups.length > 0;
+    const hasUngrouped = presets.some((preset) => !preset.group);
+    if (state.groupFilter && state.groupFilter !== UNGROUPED && !groups.includes(state.groupFilter)) {
+      state.groupFilter = '';
+      store.write(GROUP_FILTER_KEY, '');
+    }
+    if (state.groupFilter === UNGROUPED && (!hasGroups || !hasUngrouped)) {
+      state.groupFilter = '';
+      store.write(GROUP_FILTER_KEY, '');
+    }
+    groupSelect.hidden = state.mode !== 'quick' || !hasGroups;
+    if (!groupSelect.hidden) {
+      groupSelect.textContent = '';
+      const allOption = document.createElement('option');
+      allOption.value = '';
+      allOption.textContent = '全部';
+      groupSelect.appendChild(allOption);
+      for (const group of groups) {
+        const option = document.createElement('option');
+        option.value = group;
+        option.textContent = group;
+        groupSelect.appendChild(option);
+      }
+      if (hasUngrouped) {
+        const option = document.createElement('option');
+        option.value = UNGROUPED;
+        option.textContent = '未分组';
+        groupSelect.appendChild(option);
+      }
+      groupSelect.value = state.groupFilter;
+    }
   }
 
   function renderBody() {
@@ -785,6 +895,17 @@
       refreshChrome();
       renderBody();
     },
+    'group-toggle': () => {
+      const select = body.querySelector('[data-field="group"]');
+      const input = body.querySelector('[data-field="group-new"]');
+      const toggle = body.querySelector('[data-action="group-toggle"]');
+      if (!select || !input || !toggle) return;
+      select.style.display = '';
+      input.style.display = 'none';
+      toggle.style.display = 'none';
+      input.value = '';
+      select.focus();
+    },
     close: closePanel,
     new: () => {
       state.mode = 'form';
@@ -804,6 +925,7 @@
       if (!window.confirm(`删除「${oneLine(list[index].name, 20)}」？删除后不可恢复。`)) return;
       list.splice(index, 1);
       savePresets(list);
+      refreshChrome();
       renderBody();
       showToast('已删除');
     },
@@ -857,6 +979,33 @@
     renderBody();
     search.focus();
     search.setSelectionRange(search.value.length, search.value.length);
+  });
+
+  // 顶栏分组筛选：过滤速选列表并记住选择；焦点交还搜索框，键盘流（↑↓/Enter）不中断
+  groupSelect.addEventListener('change', () => {
+    state.groupFilter = groupSelect.value;
+    store.write(GROUP_FILTER_KEY, state.groupFilter);
+    state.cursor = 0;
+    renderBody();
+    search.focus();
+  });
+
+  // 表单里的「分组」下拉：选「➕ 新建分组…」时原地换成文本输入框
+  body.addEventListener('change', (event) => {
+    if (!event.target.matches('[data-field="group"]')) return;
+    const select = event.target;
+    const input = body.querySelector('[data-field="group-new"]');
+    const toggle = body.querySelector('[data-action="group-toggle"]');
+    if (!input || !toggle) return;
+    const toNew = select.value === '__new__';
+    select.style.display = toNew ? 'none' : '';
+    input.style.display = toNew ? '' : 'none';
+    toggle.style.display = toNew ? '' : 'none';
+    if (toNew) {
+      input.focus();
+    } else {
+      input.value = '';
+    }
   });
 
   body.addEventListener(
@@ -1015,6 +1164,9 @@
   });
 
   /* ---------- 初始化 ---------- */
+
+  const savedFilter = store.read(GROUP_FILTER_KEY, '');
+  state.groupFilter = typeof savedFilter === 'string' ? savedFilter : '';
 
   const savedPos = store.read(BALL_POS_KEY, null);
   if (savedPos && typeof savedPos.x === 'number' && typeof savedPos.y === 'number') {
