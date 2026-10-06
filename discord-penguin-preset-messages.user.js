@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         企鹅预设消息
 // @namespace    https://github.com/Civinar-Riley/discord-penguin-preset-messages
-// @version      0.2.0
+// @version      0.2.1
 // @description  把预设消息填进你自己的输入框，无需机器人、无需服务器权限
 // @author       企鹅预设消息
 // @match        https://discord.com/*
@@ -198,9 +198,12 @@
   // 保持一致——能发送、能删除、发送后清空。execCommand 一族对 Discord 的
   // 模型完全不可见（文字看得见却发不出去也删不掉），不能作为填入手段。
   // Chrome 禁止构造 TextEvent，用 InputEvent 携带同名事件与 data。
+  // 返回值只表示「事件派发出去了」，不是「文字进没进去」——编辑器收字后要等
+  // 它自己的渲染提交，判定一律看 DOM（见 waitForEditorChange）。
   function textInsert(editor, text) {
     try {
-      return editor.dispatchEvent(new InputEvent('textInput', { bubbles: true, cancelable: true, data: text }));
+      editor.dispatchEvent(new InputEvent('textInput', { bubbles: true, cancelable: true, data: text }));
+      return true;
     } catch (_) {
       return false;
     }
@@ -222,7 +225,41 @@
     } catch (_) {
       return false;
     }
-    return editor.dispatchEvent(event);
+    try {
+      editor.dispatchEvent(event);
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  // 编辑器把文字渲染进 DOM 的时机不确定（Slate 的提交可能落在 microtask、下一帧
+  // 甚至更晚），派发事件后同步读 DOM 必然误判：文字其实已经进去了、用户按回车
+  // 也发得出去，脚本却弹「填入失败」（0.2.0 及以前）。所以一律轮询等真实的 DOM
+  // 变化，并且：
+  //   · 只比较文本是否变化，不比较长度——插入可能替换掉原有选区的文字，长度不增
+  //     也算收下；
+  //   · 编辑器节点被 React 换掉时重新定位当前编辑器，别对着已脱离文档的旧节点读
+  //     （那上面永远读不到新文字）。
+  const INSERT_WAIT_MS = 240; // 单条通路：等编辑器渲染的最长时间
+  const INSERT_LATE_MS = 600; // 兜底通路之后，判定失败前的最后宽限
+
+  function waitForEditorChange(editor, before, timeoutMs) {
+    const liveEditor = () => (editor.isConnected ? editor : findEditor());
+    return new Promise((resolve) => {
+      const deadline = Date.now() + timeoutMs;
+      const check = () => {
+        const live = liveEditor();
+        if (live && editorText(live) !== before) {
+          resolve(true);
+        } else if (Date.now() >= deadline) {
+          resolve(false);
+        } else {
+          setTimeout(check, 20);
+        }
+      };
+      check();
+    });
   }
 
   // 返回 { ok, via, reason }
@@ -231,21 +268,24 @@
     if (!editor) return { ok: false, reason: 'no-editor' };
 
     const before = editorText(editor);
-    const grew = () => editorText(editor).length > before.length;
 
+    // 只有等到「DOM 确实没变」才换下一条通路：textInput 已经收下、只是渲染慢时
+    // 再派一次 paste，同一段文字会被插两遍
     editor.focus();
     caretToEnd(editor);
-    if (textInsert(editor, text)) {
-      // 编辑器收下文字后经自身渲染才反映到 DOM，立即读可能还没变化，
-      // 给一帧宽限再判定，避免误判失败后用 paste 再插一遍造成重复
-      if (grew()) return { ok: true, via: 'textInput' };
-      await new Promise((resolve) => setTimeout(resolve, 60));
-      if (grew()) return { ok: true, via: 'textInput' };
+    if (textInsert(editor, text) && (await waitForEditorChange(editor, before, INSERT_WAIT_MS))) {
+      return { ok: true, via: 'textInput' };
     }
 
     editor.focus();
     caretToEnd(editor);
-    if (pasteInsert(editor, text) && grew()) return { ok: true, via: 'paste' };
+    if (pasteInsert(editor, text) && (await waitForEditorChange(editor, before, INSERT_WAIT_MS))) {
+      return { ok: true, via: 'paste' };
+    }
+
+    // 两条通路都没等到变化：也可能只是渲染比上限还慢，再宽限一段再报失败。
+    // 文字明明进去了却弹「填入失败」，比多等一会儿更难向用户解释
+    if (await waitForEditorChange(editor, before, INSERT_LATE_MS)) return { ok: true, via: 'paste' };
 
     return { ok: false, reason: 'insert-failed' };
   }
@@ -742,8 +782,11 @@
     if (!preset) return;
     if (typeof pos === 'number') state.cursor = pos;
 
-    const result = await insertIntoInput(composeMessage(preset));
+    // 先把面板关掉再填入：填入要等编辑器渲染（最坏近一秒），面板顶着不关既挡
+    // 输入框，又给「等待期间再按一次回车 → 第二次填入」留出门——同一段文字会
+    // 被插两遍
     closePanel();
+    const result = await insertIntoInput(composeMessage(preset));
 
     if (result.ok) {
       showToast('已填入输入框，按回车发送');
