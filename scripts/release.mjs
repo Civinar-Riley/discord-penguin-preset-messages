@@ -15,8 +15,38 @@ const ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 const SCRIPT = 'discord-penguin-preset-messages.user.js';
 const DRY = process.argv.includes('--dry-run');
 
-const capture = (command, args) => execFileSync(command, args, { cwd: ROOT, encoding: 'utf8' }).trim();
-const run = (command, args) => execFileSync(command, args, { cwd: ROOT, stdio: 'inherit' });
+// Windows 上 node 只能启动 .exe / .cmd，启动不了 Git Bash 的 shell 包装脚本
+// （比如把代理塞进 -c 的 ~/bin/git）。那种情况下必须走 bash，否则会绕过包装、
+// 以「直连」去连 GitHub——网络一断就推不上去，而 shell 里手敲 git 却是好的。
+function resolveGitWrapper() {
+  if (process.platform !== 'win32') return null;
+  try {
+    const resolved = execFileSync('bash', ['-lc', 'command -v git'], { encoding: 'utf8' }).trim();
+    if (resolved && !/\.(exe|cmd|bat)$/i.test(resolved)) return resolved;
+  } catch (_) {
+    /* 没有 bash 就用默认的 git */
+  }
+  return null;
+}
+const GIT_WRAPPER = resolveGitWrapper();
+
+function spawn(command, args, capture) {
+  return execFileSync(command, args, {
+    cwd: ROOT,
+    encoding: capture ? 'utf8' : undefined,
+    stdio: capture ? 'pipe' : 'inherit',
+  });
+}
+
+const git = (args, capture) => {
+  const out = GIT_WRAPPER ? spawn('bash', [GIT_WRAPPER, ...args], capture) : spawn('git', args, capture);
+  return capture ? String(out).trim() : out;
+};
+const gh = (args, capture) => {
+  const out = spawn('gh', args, capture);
+  return capture ? String(out).trim() : out;
+};
+
 const step = (message) => console.log(`\n== ${message}`);
 const ok = (message) => console.log(`✓ ${message}`);
 const die = (message) => {
@@ -27,7 +57,7 @@ const die = (message) => {
 /* ---------- 1. 自检 ---------- */
 
 step('自检');
-run(process.execPath, ['scripts/verify.mjs']);
+spawn(process.execPath, ['scripts/verify.mjs']);
 
 /* ---------- 2. 版本与 Release 说明 ---------- */
 
@@ -46,29 +76,29 @@ ok(`版本 ${version}，Release 说明 ${notes.length} 字（取自 CHANGELOG）
 
 step('检查工作区与分支');
 // 只看已跟踪文件：.zcode/ 这类本地目录永远未跟踪，不该挡发版
-const dirty = capture('git', ['status', '--porcelain', '--untracked-files=no']);
+const dirty = git(['status', '--porcelain', '--untracked-files=no'], true);
 if (dirty) die(`工作区有未提交的改动，先提交再发版：\n${dirty}`);
-const branch = capture('git', ['rev-parse', '--abbrev-ref', 'HEAD']);
+const branch = git(['rev-parse', '--abbrev-ref', 'HEAD'], true);
 if (branch !== 'main') die(`当前分支是 ${branch}，发版应在 main 上`);
 try {
-  capture('gh', ['auth', 'status']);
+  gh(['auth', 'status'], true);
 } catch {
   die('gh 未登录（先跑 gh auth login）');
 }
-ok('工作区干净，分支 main，gh 已登录');
+ok(`工作区干净，分支 main，gh 已登录${GIT_WRAPPER ? '（git 走 shell 包装：' + GIT_WRAPPER + '）' : ''}`);
 
 /* ---------- 4. tag ---------- */
 
 step(`打 tag ${tag}`);
-const head = capture('git', ['rev-parse', 'HEAD']);
-if (capture('git', ['tag', '--list', tag])) {
-  const tagged = capture('git', ['rev-list', '-n', '1', tag]);
+const head = git(['rev-parse', 'HEAD'], true);
+if (git(['tag', '--list', tag], true)) {
+  const tagged = git(['rev-list', '-n', '1', tag], true);
   if (tagged !== head) die(`tag ${tag} 已存在但指向别的提交（${tagged.slice(0, 7)} ≠ ${head.slice(0, 7)}），先处理这个 tag`);
   ok(`tag ${tag} 已存在且指向 HEAD，跳过`);
 } else if (DRY) {
   ok(`[dry-run] git tag -a ${tag} -m ${version}`);
 } else {
-  run('git', ['tag', '-a', tag, '-m', version]);
+  git(['tag', '-a', tag, '-m', version]);
   ok(`已创建 ${tag}`);
 }
 
@@ -79,10 +109,10 @@ if (DRY) {
   ok(`[dry-run] git push origin main && git push origin ${tag}`);
 } else {
   try {
-    run('git', ['push', 'origin', 'main']);
-    run('git', ['push', 'origin', tag]);
+    git(['push', 'origin', 'main']);
+    git(['push', 'origin', tag]);
   } catch {
-    die('推送失败：检查网络 / 代理（git config http.proxy 指向的代理可能不通；可临时用 git -c http.proxy= 绕过）');
+    die('推送失败：检查网络 / 代理（代理不通时可临时 git -c http.proxy= push，或在 shell 里手动推送后重跑本脚本）');
   }
   ok('已推送');
 }
@@ -92,7 +122,7 @@ if (DRY) {
 step('创建 GitHub Release');
 let releaseExists = '';
 try {
-  releaseExists = capture('gh', ['release', 'view', tag, '--json', 'tagName']);
+  releaseExists = gh(['release', 'view', tag, '--json', 'tagName'], true);
 } catch {
   releaseExists = '';
 }
@@ -101,8 +131,8 @@ if (releaseExists) {
 } else if (DRY) {
   ok(`[dry-run] gh release create ${tag} --title ${tag} --notes-file <CHANGELOG 条目>`);
 } else {
-  const repo = capture('gh', ['repo', 'view', '--json', 'nameWithOwner', '--jq', '.nameWithOwner']);
-  const previous = capture('git', ['tag', '--sort=-v:refname', '--list', 'v*'])
+  const repo = gh(['repo', 'view', '--json', 'nameWithOwner', '--jq', '.nameWithOwner'], true);
+  const previous = git(['tag', '--sort=-v:refname', '--list', 'v*'], true)
     .split('\n')
     .filter((name) => name && name !== tag)[0];
   const body = previous
@@ -112,7 +142,7 @@ if (releaseExists) {
   const file = join(dir, 'notes.md');
   writeFileSync(file, body);
   try {
-    run('gh', ['release', 'create', tag, '--title', tag, '--notes-file', file]);
+    gh(['release', 'create', tag, '--title', tag, '--notes-file', file]);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
