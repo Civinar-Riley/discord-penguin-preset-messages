@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         企鹅预设消息
 // @namespace    https://github.com/Civinar-Riley/discord-penguin-preset-messages
-// @version      0.2.1
+// @version      0.3.0
 // @description  把预设消息填进你自己的输入框，无需机器人、无需服务器权限
 // @author       企鹅预设消息
 // @match        https://discord.com/*
@@ -95,9 +95,11 @@
     if (!item || typeof item !== 'object' || Array.isArray(item)) return 'invalid';
 
     const name = typeof item.name === 'string' ? item.name.trim() : '';
-    const content = typeof item.content === 'string' ? item.content.trim() : '';
+    // 内容按原样保留：首尾空格、空行都是用户写进去的，填入时要一模一样；
+    // 只有「整条都是空白」才判为无效（Discord 也发不出全空白消息）
+    const content = typeof item.content === 'string' ? item.content : '';
     if (!name || name.length > LIMITS.nameMax) return 'invalid';
-    if (!content || content.length > LIMITS.contentMax) return 'invalid';
+    if (!content.trim() || content.length > LIMITS.contentMax) return 'invalid';
 
     let attachments = [];
     if (item.attachments !== undefined && item.attachments !== null) {
@@ -377,6 +379,11 @@
     .hint { color: #80848e; font-size: 11px; }
     .error { color: #fa7575; font-size: 12px; }
 
+    .pending { display: flex; flex-direction: column; gap: 6px; border-top: 1px solid #2e2f33; padding-top: 8px; }
+    .pending[hidden] { display: none; }
+    .pending-item { display: flex; align-items: center; gap: 6px; padding: 5px 8px; border: 1px solid #3f4147; border-radius: 6px; background: #232428; }
+    .pending-name { min-width: 0; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
     .toast {
       position: fixed; right: 22px; bottom: 176px;
       padding: 9px 14px; border-radius: 8px;
@@ -505,6 +512,7 @@
     open: false,
     mode: 'quick', // quick | admin | form | import
     editing: null, // 'new' | 索引字符串 | null
+    pending: [], // 新增模式的待保存条目（只在内存里，保存时才落存储）
     query: '',
     groupFilter: '', // '' = 全部；UNGROUPED = 未分组；其余为分组名
     cursor: 0,
@@ -558,12 +566,19 @@
 
   /* ---------- 管理列表 ---------- */
 
+  // 管理列表与速选共用顶栏的分组筛选；过滤后仍带原始索引，编辑/删除指向正确条目
   function adminListHTML(presets) {
     if (!presets.length) {
       return '<div class="empty">还没有预设消息。<br>点右上角「新增」创建第一条。</div>';
     }
-    return `<div class="list">${presets
-      .map((preset, index) => {
+    const entries = presets
+      .map((preset, index) => ({ preset, index }))
+      .filter(({ preset }) => matchesGroupFilter(preset));
+    if (!entries.length) {
+      return '<div class="empty">当前分组下没有预设。<br>切换顶栏分组，或点「+ 新增」加一条。</div>';
+    }
+    return `<div class="list">${entries
+      .map(({ preset, index }) => {
         const count = Array.isArray(preset.attachments) ? preset.attachments.length : 0;
         return `<div class="item">
           <div class="item-name">${esc(preset.name)}${preset.group ? `<span class="kbd">${esc(preset.group)}</span>` : ''}</div>
@@ -596,7 +611,13 @@
     const heading = isEdit ? `编辑预设 · ${index + 1} / ${presets.length}` : '新增预设';
     const attachText = (preset.attachments || []).join('\n');
     const groups = deriveGroups(presets);
-    const currentGroup = typeof preset.group === 'string' ? preset.group : '';
+    // 新增时管理页正筛着某个分组 → 默认归到该分组，省一次选择
+    const currentGroup =
+      typeof preset.group === 'string'
+        ? preset.group
+        : !isEdit && state.groupFilter && state.groupFilter !== UNGROUPED
+          ? state.groupFilter
+          : '';
     if (currentGroup && !groups.includes(currentGroup)) groups.push(currentGroup);
     const groupOptionsHTML = ['']
       .concat(groups)
@@ -606,6 +627,23 @@
       )
       .concat('<option value="__new__">➕ 新建分组…</option>')
       .join('');
+
+    // 新增模式支持连续添加：先「添加」进待保存区，最后「保存」一次性写入
+    const actionRowHTML = isEdit
+      ? `<div class="row">
+        <button class="btn primary" type="button" data-action="save">保存</button>
+        <button class="btn" type="button" data-action="back">取消</button>
+        <span class="spacer"></span>
+        <span class="hint" data-role="error"></span>
+      </div>`
+      : `<div class="row">
+        <button class="btn" type="button" data-action="add-pending">添加</button>
+        <button class="btn primary" type="button" data-action="save">保存</button>
+        <button class="btn" type="button" data-action="back">取消</button>
+        <span class="spacer"></span>
+        <span class="hint" data-role="error"></span>
+      </div>
+      <div class="pending" data-role="pending" hidden></div>`;
 
     return `<div class="form">
       <div class="row"><span class="title">${esc(heading)}</span></div>
@@ -631,12 +669,7 @@
         <span class="label">附件链接（每行一个，最多 ${LIMITS.attachmentMax} 个，可留空）</span>
         <textarea class="textarea" data-field="attachments" style="min-height:64px" placeholder="https://example.com/a.png" spellcheck="false">${esc(attachText)}</textarea>
       </div>
-      <div class="row">
-        <button class="btn primary" type="button" data-action="save">保存</button>
-        <button class="btn" type="button" data-action="back">取消</button>
-        <span class="spacer"></span>
-        <span class="hint" data-role="error"></span>
-      </div>
+      ${actionRowHTML}
     </div>`;
   }
 
@@ -658,9 +691,11 @@
     }
   }
 
-  function saveForm() {
+  // 读表单并校验，返回 { error } 或 { item }。添加 / 保存 / 编辑共用这一份规则
+  function readFormItem() {
     const name = readField('name').trim();
-    const content = readField('content').trim();
+    // 内容按原样保留：首尾空格、空行不裁，填入时与保存时一模一样
+    const content = readField('content');
     const attachments = readField('attachments')
       .split('\n')
       .map((line) => line.trim())
@@ -676,33 +711,151 @@
       }
     }
 
-    if (!name) return setFieldError('名称不能为空');
-    if (name.length > LIMITS.nameMax) return setFieldError(`名称最多 ${LIMITS.nameMax} 字`);
-    if (!content) return setFieldError('内容不能为空');
-    if (content.length > LIMITS.contentMax) return setFieldError(`内容最多 ${LIMITS.contentMax} 字`);
-    if (attachments.length > LIMITS.attachmentMax) return setFieldError(`附件最多 ${LIMITS.attachmentMax} 个`);
+    if (!name) return { error: '名称不能为空' };
+    if (name.length > LIMITS.nameMax) return { error: `名称最多 ${LIMITS.nameMax} 字` };
+    if (!content.trim()) return { error: '内容不能为空' };
+    if (content.length > LIMITS.contentMax) return { error: `内容最多 ${LIMITS.contentMax} 字` };
+    if (attachments.length > LIMITS.attachmentMax) return { error: `附件最多 ${LIMITS.attachmentMax} 个` };
     const badUrl = attachments.find((url) => !URL_RE.test(url));
-    if (badUrl) return setFieldError(`附件必须是 http(s) 链接：${oneLine(badUrl, 40)}`);
-
-    const list = loadPresets();
-    const editingIndex = state.editing === 'new' ? -1 : Number(state.editing);
-    if (list.some((preset, index) => index !== editingIndex && preset.name === name)) {
-      return setFieldError('名称已存在，换一个');
-    }
+    if (badUrl) return { error: `附件必须是 http(s) 链接：${oneLine(badUrl, 40)}` };
 
     const item = { name, content };
     if (attachments.length) item.attachments = attachments;
     if (group) item.group = group;
+    return { item };
+  }
 
-    if (editingIndex < 0) list.push(item);
-    else list[editingIndex] = item;
+  // 表单里是否填了东西：「保存」用它判断当前这条要不要一起带上
+  function formHasInput() {
+    if (readField('name').trim() || readField('content').trim() || readField('attachments').trim()) return true;
+    const groupNewInput = body.querySelector('[data-field="group-new"]');
+    return !!(groupNewInput && groupNewInput.style.display !== 'none' && groupNewInput.value.trim());
+  }
 
-    savePresets(list);
+  // 重名检查：对已存预设与待保存列表都不许重名；skipIndex 供编辑时跳过自身
+  function isDuplicateName(item, skipIndex) {
+    const list = loadPresets();
+    if (list.some((preset, index) => index !== skipIndex && preset.name === item.name)) return true;
+    return state.pending.some((preset) => preset.name === item.name);
+  }
+
+  // 新增模式：当前表单收进待保存区，继续填下一条
+  function addPending() {
+    const result = readFormItem();
+    if (result.error) return setFieldError(result.error);
+    if (isDuplicateName(result.item, -1)) return setFieldError('名称已存在，换一个');
+
+    state.pending.push(result.item);
+    setFieldError('');
+    // 只清内容不清分组：连着加同一组的多条不用重选
+    for (const field of ['name', 'content', 'attachments']) {
+      const input = body.querySelector(`[data-field="${field}"]`);
+      if (input) input.value = '';
+    }
+    renderPending();
+    focusForm();
+  }
+
+  function removePending(pos) {
+    if (!state.pending[pos]) return;
+    state.pending.splice(pos, 1);
+    renderPending();
+  }
+
+  function clearPending() {
+    if (!state.pending.length) return;
+    if (!window.confirm(`清空 ${state.pending.length} 条待保存的预设？`)) return;
+    state.pending = [];
+    renderPending();
+  }
+
+  // 待保存的条目还没落库，离开新增表单 / 关面板前先确认
+  function confirmDiscardPending() {
+    if (!state.pending.length) return true;
+    return window.confirm(`有 ${state.pending.length} 条待保存的预设，放弃并返回？`);
+  }
+
+  // 保存的条目若不匹配当前分组筛选，回落「全部」，避免「保存成功却看不见」
+  function ensureSavedVisible(items) {
+    if (!state.groupFilter) return;
+    if (items.every((preset) => matchesGroupFilter(preset))) return;
+    state.groupFilter = '';
+    store.write(GROUP_FILTER_KEY, '');
+  }
+
+  function finishSave(count, name) {
     state.editing = null;
+    state.pending = [];
     state.mode = 'admin';
     refreshChrome();
     renderBody();
-    showToast(`已保存「${oneLine(name, 16)}」`);
+    showToast(count === 1 ? `已保存「${oneLine(name, 16)}」` : `已保存 ${count} 条预设`);
+  }
+
+  function saveEditForm(index) {
+    const result = readFormItem();
+    if (result.error) return setFieldError(result.error);
+    if (isDuplicateName(result.item, index)) return setFieldError('名称已存在，换一个');
+
+    const list = loadPresets();
+    list[index] = result.item;
+    savePresets(list);
+    ensureSavedVisible([result.item]);
+    finishSave(1, result.item.name);
+  }
+
+  // 新增模式：待保存一次性写入。表单里还有内容就先并进去——
+  // 填完直接点「保存」不点「添加」= 老的单条保存流程，行为不变
+  function saveNewBatch() {
+    if (formHasInput()) {
+      const result = readFormItem();
+      if (result.error) return setFieldError(`${result.error}（这条不完整，未加入待保存）`);
+      if (isDuplicateName(result.item, -1)) return setFieldError('名称已存在，换一个');
+      state.pending.push(result.item);
+    }
+    if (!state.pending.length) return setFieldError('名称不能为空');
+
+    // 对存储再查一遍重名（添加时查过一次，这里防多标签页并发写入）
+    const list = loadPresets();
+    const taken = new Set(list.map((preset) => preset.name));
+    for (const item of state.pending) {
+      if (taken.has(item.name)) return setFieldError(`名称已存在：${oneLine(item.name, 16)}`);
+      taken.add(item.name);
+    }
+
+    list.push(...state.pending);
+    savePresets(list);
+    ensureSavedVisible(state.pending);
+    const count = state.pending.length;
+    const firstName = state.pending[0].name;
+    finishSave(count, firstName);
+  }
+
+  // 待保存区只重渲染自己这一块，不整表单重绘——否则输入框里的内容会丢
+  function renderPending() {
+    const slot = body.querySelector('[data-role="pending"]');
+    if (!slot) return;
+    const count = state.pending.length;
+    const saveButton = body.querySelector('[data-action="save"]');
+    if (saveButton) saveButton.textContent = count ? `保存 ${count} 条` : '保存';
+    slot.hidden = !count;
+    slot.innerHTML = !count
+      ? ''
+      : `<div class="row">
+          <span class="label">待保存（${count} 条）</span>
+          <span class="spacer"></span>
+          <button class="btn" type="button" data-action="pending-clear">清空</button>
+        </div>
+        <div class="list">${state.pending
+          .map(
+            (item, pos) => `<div class="pending-item">
+              <span class="pending-name">${esc(item.name)}</span>
+              ${item.group ? `<span class="kbd">${esc(item.group)}</span>` : ''}
+              <span class="spacer"></span>
+              <button class="btn" type="button" data-action="pending-remove" data-idx="${pos}">移除</button>
+            </div>`,
+          )
+          .join('')}</div>`;
   }
 
   /* ---------- 导入 / 导出 ---------- */
@@ -822,7 +975,7 @@
     // closed shadow DOM 下 document.activeElement 只会是宿主元素，须查 shadow 根内部的焦点
     if (root.activeElement !== search) search.value = state.query;
 
-    // 分组筛选下拉：仅速选模式且存在分组时显示；选中的分组失效（被删空）时回落「全部」
+    // 分组筛选下拉：速选与管理页都显示；选中的分组失效（被删空）时回落「全部」
     const presets = loadPresets();
     const groups = deriveGroups(presets);
     const hasGroups = groups.length > 0;
@@ -835,7 +988,8 @@
       state.groupFilter = '';
       store.write(GROUP_FILTER_KEY, '');
     }
-    groupSelect.hidden = state.mode !== 'quick' || !hasGroups;
+    // 分组下拉在速选与管理页都可用，两边共用同一份筛选状态
+    groupSelect.hidden = (state.mode !== 'quick' && state.mode !== 'admin') || !hasGroups;
     if (!groupSelect.hidden) {
       groupSelect.textContent = '';
       const allOption = document.createElement('option');
@@ -871,12 +1025,17 @@
     if (state.mode === 'admin') {
       body.innerHTML = adminListHTML(presets);
       adminToolbar();
-      footer.textContent = `${presets.length} 条预设 · Esc 返回速选`;
+      const visible = presets.filter((preset) => matchesGroupFilter(preset)).length;
+      footer.textContent = state.groupFilter
+        ? `${visible} / ${presets.length} 条预设 · Esc 返回速选`
+        : `${presets.length} 条预设 · Esc 返回速选`;
       return;
     }
     if (state.mode === 'form') {
+      const isEdit = state.editing !== 'new';
       body.innerHTML = formHTML(presets);
-      footer.textContent = 'Enter 不能提交，请点「保存」';
+      footer.textContent = isEdit ? 'Enter 不能提交，请点「保存」' : '「添加」继续加下一条，「保存」一起写入';
+      if (!isEdit) renderPending();
       focusForm();
       return;
     }
@@ -889,6 +1048,7 @@
     state.open = true;
     state.mode = 'quick';
     state.editing = null;
+    state.pending = [];
     state.query = '';
     state.cursor = 0;
     refreshChrome();
@@ -901,6 +1061,8 @@
   }
 
   function closePanel() {
+    if (!confirmDiscardPending()) return;
+    state.pending = [];
     state.open = false;
     panel.hidden = true;
   }
@@ -933,8 +1095,10 @@
       renderBody();
     },
     back: () => {
+      if (state.mode === 'form' && !confirmDiscardPending()) return;
       state.mode = state.mode === 'admin' ? 'quick' : 'admin';
       state.editing = null;
+      state.pending = [];
       refreshChrome();
       renderBody();
     },
@@ -953,12 +1117,14 @@
     new: () => {
       state.mode = 'form';
       state.editing = 'new';
+      state.pending = [];
       refreshChrome();
       renderBody();
     },
     edit: (index) => {
       state.mode = 'form';
       state.editing = String(index);
+      state.pending = [];
       refreshChrome();
       renderBody();
     },
@@ -980,7 +1146,13 @@
       renderBody();
     },
     'run-import': runImport,
-    save: saveForm,
+    save: () => {
+      if (state.editing === 'new') saveNewBatch();
+      else saveEditForm(Number(state.editing));
+    },
+    'add-pending': addPending,
+    'pending-remove': removePending,
+    'pending-clear': clearPending,
   };
 
   // 委托绑在 panel 上：顶栏（管理/返回/关闭）和内容区的按钮都要能收到
@@ -1143,8 +1315,10 @@
         event.preventDefault();
         event.stopPropagation();
         if (state.mode === 'form' || state.mode === 'import') {
+          if (state.mode === 'form' && !confirmDiscardPending()) return;
           state.mode = 'admin';
           state.editing = null;
+          state.pending = [];
           refreshChrome();
           renderBody();
         } else if (state.mode === 'admin') {
