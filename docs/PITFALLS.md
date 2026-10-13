@@ -63,6 +63,9 @@
 - closed shadow DOM 的定位探针：`document.elementFromPoint(x, y)` 命中面板/球时返回宿主元素，可用来确认坐标覆盖与面板开关状态。
 - 面板在 closed shadow root 里读不到内部状态，从页面侧观察用：`elementFromPoint` 探针、localStorage（预设/球位置落库结果）、截图。
 - **harness 里把 `Element.prototype.attachShadow` 改成强制 `mode: 'open'`**（在脚本加载前打补丁），就能直接读面板内部：toast 文本、列表条目、按钮，比截图断言可靠得多。脚本自己持有 shadowRoot 引用，改成 open 不影响它的行为。
+- harness 的假编辑器**不能 `position: fixed`**：脚本用 `offsetParent !== null` 判「可见编辑器」，fixed 元素的 `offsetParent` 恒为 null，会被判成「当前页面没有输入框」，白排查半天。放正常文档流里（0.4.0 踩到）。
+- 重载页面后要**重新挂事件间谍**（监听编辑器的 `textInput` / `paste`）。旧监听随文档一起没了，不重挂会以为「填入没发生」，实际是没人记录（0.4.0 踩到）。
+- 截图接口会间歇报 `surface preparation timed out`（与鼠标注入失灵同源）：视觉核对失败先重试，别怀疑代码；布局核对可以退化成 `getBoundingClientRect` 的几何断言（面板位置、行宽、是否出屏都能这样验）。
 - 合成鼠标事件要带 `composed: true` 才穿得过 shadow 边界到达 `window`：真实鼠标事件是 composed，`new MouseEvent(type, { bubbles: true })` 不是。漏了这个会让「点击悬浮球开面板」在 harness 里永远失败，而误以为是脚本的 bug。
 - 标签页不在前台时定时器被节流成 ~1s、`rAF` 完全不触发（`document.hasFocus()` 为 false，点一下页面能拿到焦点但节流照旧）。要复现「渲染迟到 N 毫秒」这类时序，别用页面里的 `setTimeout`，改由外部（Node 侧不受节流）在指定时刻调用 harness 暴露的 `flush()` 触发渲染，才能精确落在「脚本判定之后、宽限之内」。
 - 时序结论要按**判定顺序**读，不要按毫秒数读：被节流的 tick 会让实际等待比代码里的常量长得多，但「先看有没有变化、再看到没到截止时间」这个顺序不变，行为仍可信；`Date.now()` 基准的截止时间是墙钟，不受 tick 延迟影响。

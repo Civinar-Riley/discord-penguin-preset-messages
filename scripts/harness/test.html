@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>penguin harness</title>
+<style>
+  body { background: #313338; color: #dbdee1; font-family: sans-serif; margin: 0; padding: 20px; }
+  /* 不能给 fixed：脚本用 offsetParent !== null 判「可见编辑器」，fixed 元素的 offsetParent 是 null */
+  #fake-editor { margin-top: 40px; width: 320px; min-height: 44px; background: #383a40; border-radius: 8px; padding: 10px; outline: none; }
+</style>
+</head>
+<body>
+<h1>penguin harness</h1>
+<p>本地测试页：加 <code>?hostile=1</code> 模拟 Discord 的抢焦点与剪辑 cancel 通道。</p>
+<div id="fake-editor" contenteditable="true" role="textbox" data-slate-editor="true"></div>
+
+<script>
+  // 强制 open shadow，便于从页面侧读面板内部（脚本自身持有引用，不受影响）
+  const originalAttachShadow = Element.prototype.attachShadow;
+  Element.prototype.attachShadow = function (init) {
+    return originalAttachShadow.call(this, Object.assign({}, init, { mode: 'open' }));
+  };
+</script>
+
+<script>
+  // 敌对页面：复刻 Discord 的两条劫持通道（PITFALLS 第二节）
+  if (new URLSearchParams(location.search).has('hostile')) {
+    const editor = document.querySelector('#fake-editor');
+    for (const type of ['pointerdown', 'mousedown']) {
+      document.addEventListener(type, (event) => {
+        if (!editor.contains(event.target)) editor.focus();
+      }, true);
+    }
+    document.addEventListener('keydown', (event) => {
+      if (event.altKey) return;
+      if (document.activeElement !== editor) editor.focus();
+    }, true);
+    for (const type of ['paste', 'copy', 'cut', 'drop', 'dragover']) {
+      document.addEventListener(type, (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+      }, true);
+    }
+  }
+</script>
+
+<script src="/userscript.js"></script>
+</body>
+</html>

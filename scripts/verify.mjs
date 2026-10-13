@@ -18,7 +18,7 @@ const RAW_URL = `https://raw.githubusercontent.com/${OWNER}/${REPO}/main/${SCRIP
 const TEXT_EXTENSIONS = new Set(['.md', '.js', '.mjs', '.yml', '.yaml', '.json', '.txt']);
 // 解耦检查只覆盖用户看得见的文件。docs/PLAN.md 是内部设计记录，保留项目名引用是有意的。
 const PUBLIC_FILES = [SCRIPT, 'README.md'];
-const ALLOWED_GRANTS = ['GM_setValue', 'GM_getValue', 'GM_deleteValue'];
+const ALLOWED_GRANTS = ['GM_setValue', 'GM_getValue'];
 
 let failed = 0;
 const pass = (message) => console.log(`✓ ${message}`);

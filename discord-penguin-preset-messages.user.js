@@ -1,13 +1,12 @@
 // ==UserScript==
 // @name         企鹅预设消息
 // @namespace    https://github.com/Civinar-Riley/discord-penguin-preset-messages
-// @version      0.3.0
+// @version      0.4.0
 // @description  把预设消息填进你自己的输入框，无需机器人、无需服务器权限
 // @author       企鹅预设消息
 // @match        https://discord.com/*
 // @grant        GM_setValue
 // @grant        GM_getValue
-// @grant        GM_deleteValue
 // @license      PolyForm-Noncommercial-1.0.0
 // @downloadURL  https://raw.githubusercontent.com/Civinar-Riley/discord-penguin-preset-messages/main/discord-penguin-preset-messages.user.js
 // @updateURL    https://raw.githubusercontent.com/Civinar-Riley/discord-penguin-preset-messages/main/discord-penguin-preset-messages.user.js
@@ -25,9 +24,14 @@
 
   const STORE_KEY = 'penguin-preset-messages:presets';
   const BALL_POS_KEY = 'penguin-preset-messages:ball-pos';
+  const BALL_HIDDEN_KEY = 'penguin-preset-messages:ball-hidden';
   const GROUP_FILTER_KEY = 'penguin-preset-messages:group-filter';
-  // 速选「未分组」筛选的固定值（带双下划线前缀，避免与用户分组名冲突）
+  const HOTKEY_KEY = 'penguin-preset-messages:hotkey';
+  // 速选「未分组」筛选的固定值；这个名字是保留字，表单与导入都会拦（否则下拉会出现两个同值选项）
   const UNGROUPED = '__ungrouped__';
+
+  // 呼出快捷键默认 Alt+P；至少要带一个修饰键，避免吞掉正常打字
+  const DEFAULT_HOTKEY = Object.freeze({ alt: true, ctrl: false, meta: false, shift: false, code: 'KeyP' });
 
   const LIMITS = Object.freeze({
     nameMax: 32,
@@ -35,6 +39,9 @@
     attachmentMax: 10,
     groupMax: 16,
   });
+
+  // 存储写失败时的统一文案：数据没落库就不能说「已保存」
+  const STORAGE_FAILED = '写入本地存储失败（可能已满）。先「导出」备份，清理浏览器存储后重试';
 
   // Discord 网页版的消息输入框（Slate 编辑器）
   const EDITOR_SELECTOR = 'div[data-slate-editor="true"][role="textbox"]';
@@ -44,6 +51,8 @@
    * 本地存储：优先 GM_*，退回 localStorage
    * ================================================================ */
 
+  // write 返回是否真的落库：GM / localStorage 都可能写失败（配额、权限），
+  // 静默失败会让界面报「已保存」而数据其实没存——预设是用户手写的，丢不起
   const store =
     typeof GM_getValue === 'function' && typeof GM_setValue === 'function'
       ? {
@@ -58,7 +67,10 @@
           write(key, value) {
             try {
               GM_setValue(key, value);
-            } catch (_) {}
+              return true;
+            } catch (_) {
+              return false;
+            }
           },
         }
       : {
@@ -73,7 +85,10 @@
           write(key, value) {
             try {
               localStorage.setItem(key, JSON.stringify(value));
-            } catch (_) {}
+              return true;
+            } catch (_) {
+              return false;
+            }
           },
         };
 
@@ -87,17 +102,18 @@
   }
 
   function savePresets(list) {
-    store.write(STORE_KEY, list);
+    return store.write(STORE_KEY, list);
   }
 
-  // 有效 → 返回归一化对象；'duplicate' 重名；'invalid' 无效条目
-  function checkPreset(item, taken) {
+  // 有效 → 返回归一化对象；'invalid' 无效条目
+  function normalizePreset(item) {
     if (!item || typeof item !== 'object' || Array.isArray(item)) return 'invalid';
 
     const name = typeof item.name === 'string' ? item.name.trim() : '';
     // 内容按原样保留：首尾空格、空行都是用户写进去的，填入时要一模一样；
-    // 只有「整条都是空白」才判为无效（Discord 也发不出全空白消息）
-    const content = typeof item.content === 'string' ? item.content : '';
+    // 只有「整条都是空白」才判为无效（Discord 也发不出全空白消息）。
+    // 换行统一成 \n：手改过的 JSON 可能带 Windows 的 \r\n
+    const content = typeof item.content === 'string' ? item.content.replace(/\r\n?/g, '\n') : '';
     if (!name || name.length > LIMITS.nameMax) return 'invalid';
     if (!content.trim() || content.length > LIMITS.contentMax) return 'invalid';
 
@@ -113,45 +129,52 @@
     let group;
     if (typeof item.group === 'string') {
       const cleaned = item.group.trim().slice(0, LIMITS.groupMax);
-      if (cleaned) group = cleaned;
+      // UNGROUPED 是「未分组」筛选项的保留值，用户分组用这个名字会让下拉出现两个同值选项
+      if (cleaned && cleaned !== UNGROUPED) group = cleaned;
     }
 
-    if (taken.has(name)) return 'duplicate';
-    taken.add(name);
     const preset = { name, content, attachments };
     if (group) preset.group = group;
     return preset;
   }
 
-  function importPresets(text) {
+  // overwrite=true 时同名条目用导入的内容替换（保留原位置），否则跳过并计数
+  function importPresets(text, overwrite) {
     let parsed;
     try {
       parsed = JSON.parse(text);
     } catch (_) {
-      return { ok: false, added: 0, duplicate: 0, invalid: 0 };
+      return { ok: false };
     }
-    if (!Array.isArray(parsed)) return { ok: false, added: 0, duplicate: 0, invalid: 0 };
+    if (!Array.isArray(parsed)) return { ok: false };
 
     const list = loadPresets();
-    const taken = new Set(list.map((p) => p.name).filter(Boolean));
     let added = 0;
+    let updated = 0;
     let duplicate = 0;
     let invalid = 0;
 
-    for (const item of parsed) {
-      const result = checkPreset(item, taken);
-      if (result === 'invalid') {
+    for (const raw of parsed) {
+      const preset = normalizePreset(raw);
+      if (preset === 'invalid') {
         invalid++;
-      } else if (result === 'duplicate') {
-        duplicate++;
-      } else {
-        list.push(result);
-        added++;
+        continue;
       }
+      const index = list.findIndex((existing) => existing.name === preset.name);
+      if (index >= 0) {
+        if (!overwrite) {
+          duplicate++;
+          continue;
+        }
+        list[index] = preset;
+        updated++;
+        continue;
+      }
+      list.push(preset);
+      added++;
     }
 
-    savePresets(list);
-    return { ok: true, added, duplicate, invalid };
+    return { ok: true, added, updated, duplicate, invalid, saved: savePresets(list) };
   }
 
   /* ================================================================
@@ -367,6 +390,9 @@
     .item-preview { color: #949ba4; font-size: 12px; margin-top: 2px; max-height: 2.6em; overflow: hidden; }
     .item-meta { color: #80848e; font-size: 11px; margin-top: 3px; }
     .kbd { font-size: 10px; padding: 1px 5px; border-radius: 4px; background: #1e1f22; border: 1px solid #3f4147; color: #949ba4; }
+    /* Enter 提示常驻在 DOM 里、只由 active 控制显隐：划过条目只切 class，不重建列表 */
+    .kbd-hint { display: none; }
+    .item.active .kbd-hint { display: inline-block; }
 
     .empty { padding: 26px 14px; text-align: center; color: #949ba4; line-height: 1.7; }
     .form { display: flex; flex-direction: column; gap: 10px; padding: 8px; }
@@ -386,6 +412,7 @@
 
     .toast {
       position: fixed; right: 22px; bottom: 176px;
+      display: flex; align-items: center; gap: 10px;
       padding: 9px 14px; border-radius: 8px;
       background: #313338; color: #fff; border: 1px solid #3f4147;
       box-shadow: 0 8px 24px rgba(0,0,0,.5);
@@ -393,6 +420,7 @@
       max-width: calc(100vw - 44px);
     }
     .toast[hidden] { display: none; }
+    .toast .btn { padding: 3px 9px; font-size: 12px; }
   `;
 
   // 阴影 DOM：与 Discord 的样式完全隔离
@@ -410,7 +438,6 @@
   ball.className = 'ball';
   ball.type = 'button';
   ball.textContent = '🐧';
-  ball.title = '企鹅预设消息（Alt+P）';
   root.appendChild(ball);
 
   const panel = document.createElement('section');
@@ -497,13 +524,84 @@
   }
 
   let toastTimer = 0;
-  function showToast(message) {
-    toast.textContent = message;
-    toast.hidden = false;
+
+  function hideToast() {
+    toast.hidden = true;
+  }
+
+  // action = { label, onClick }：可选的操作按钮（如删除后的「撤销」）
+  function showToast(message, action, duration) {
     clearTimeout(toastTimer);
-    toastTimer = setTimeout(() => {
-      toast.hidden = true;
-    }, 2600);
+    toast.textContent = '';
+    const text = document.createElement('span');
+    text.textContent = message;
+    toast.appendChild(text);
+    if (action) {
+      const button = document.createElement('button');
+      button.className = 'btn';
+      button.type = 'button';
+      button.textContent = action.label;
+      button.addEventListener('click', () => {
+        hideToast();
+        action.onClick();
+      });
+      toast.appendChild(button);
+    }
+    toast.hidden = false;
+    toastTimer = setTimeout(hideToast, duration || 2600);
+  }
+
+  /* ---------- 呼出快捷键 / 悬浮球显隐（本地设置） ---------- */
+
+  function loadHotkey() {
+    const raw = store.read(HOTKEY_KEY, null);
+    if (!raw || typeof raw !== 'object') return { ...DEFAULT_HOTKEY };
+    const combo = {
+      alt: !!raw.alt,
+      ctrl: !!raw.ctrl,
+      meta: !!raw.meta,
+      shift: !!raw.shift,
+      code: typeof raw.code === 'string' ? raw.code : '',
+    };
+    // 至少要带一个修饰键，否则会把正常打字吞掉
+    if (!combo.code || !(combo.alt || combo.ctrl || combo.meta)) return { ...DEFAULT_HOTKEY };
+    return combo;
+  }
+
+  function hotkeyLabel(combo) {
+    const parts = [];
+    if (combo.ctrl) parts.push('Ctrl');
+    if (combo.alt) parts.push('Alt');
+    if (combo.shift) parts.push('Shift');
+    if (combo.meta) parts.push('Cmd');
+    parts.push(combo.code.replace(/^Key/, '').replace(/^Digit/, ''));
+    return parts.join('+');
+  }
+
+  function matchesHotkey(event, combo) {
+    return (
+      event.code === combo.code &&
+      event.altKey === combo.alt &&
+      event.ctrlKey === combo.ctrl &&
+      event.metaKey === combo.meta &&
+      event.shiftKey === combo.shift
+    );
+  }
+
+  function updateBallTitle() {
+    ball.title = `企鹅预设消息（${hotkeyLabel(state.hotkey)}）`;
+  }
+
+  function saveHotkey(combo) {
+    state.hotkey = combo;
+    store.write(HOTKEY_KEY, combo);
+    updateBallTitle();
+  }
+
+  function setBallHidden(hidden) {
+    state.ballHidden = hidden;
+    store.write(BALL_HIDDEN_KEY, hidden);
+    ball.hidden = hidden;
   }
 
   /* ---------- 状态 ---------- */
@@ -517,6 +615,9 @@
     groupFilter: '', // '' = 全部；UNGROUPED = 未分组；其余为分组名
     cursor: 0,
     filtered: [],
+    hotkey: { ...DEFAULT_HOTKEY },
+    ballHidden: false,
+    capturingHotkey: false, // 管理页正在录制新快捷键
   };
 
   /* ---------- 速选列表 ---------- */
@@ -525,6 +626,11 @@
     if (!state.groupFilter) return true;
     if (state.groupFilter === UNGROUPED) return !preset.group;
     return preset.group === state.groupFilter;
+  }
+
+  // 当前筛选的是不是某个具体分组（'' 与 UNGROUPED 都算「不是具体分组」）
+  function currentGroupFilter() {
+    return state.groupFilter && state.groupFilter !== UNGROUPED ? state.groupFilter : '';
   }
 
   function quickHTML(presets) {
@@ -536,7 +642,8 @@
         ({ preset }) =>
           !query ||
           String(preset.name).toLowerCase().includes(query) ||
-          String(preset.content).toLowerCase().includes(query),
+          String(preset.content).toLowerCase().includes(query) ||
+          String(preset.group || '').toLowerCase().includes(query),
       );
     if (state.cursor >= state.filtered.length) state.cursor = Math.max(0, state.filtered.length - 1);
 
@@ -547,11 +654,13 @@
       return `<div class="empty">没有匹配「${esc(state.query.trim())}」的预设。</div>`;
     }
 
+    // 筛着某个分组时组徽标是冗余的，只在「全部 / 未分组」下显示
+    const showGroup = !state.groupFilter;
     return `<div class="list">${state.filtered
       .map(({ preset, index }, pos) => {
         const active = pos === state.cursor;
         return `<div class="item${active ? ' active' : ''}" data-idx="${index}" data-pos="${pos}">
-          <div class="item-name">${esc(preset.name)}${active ? '<span class="kbd">Enter</span>' : ''}</div>
+          <div class="item-name">${esc(preset.name)}${showGroup && preset.group ? `<span class="kbd">${esc(preset.group)}</span>` : ''}<span class="kbd kbd-hint">Enter</span></div>
           <div class="item-preview">${esc(oneLine(preset.content, 60))}</div>
           ${attachmentMeta(preset)}
         </div>`;
@@ -561,21 +670,36 @@
 
   function quickFooter(presets) {
     if (!presets.length) return '0 条预设 · 点右上角「管理」开始';
-    return `${state.filtered.length} / ${presets.length} 条 · Enter 填入 · Esc 关闭`;
+    const digits = !state.query && state.filtered.length > 1 ? ' · 1-9 速填' : '';
+    return `${state.filtered.length} / ${presets.length} 条 · Enter 填入${digits} · Esc 关闭`;
   }
 
   /* ---------- 管理列表 ---------- */
 
-  // 管理列表与速选共用顶栏的分组筛选；过滤后仍带原始索引，编辑/删除指向正确条目
+  // 管理列表的可见条目：分组筛选 + 搜索（与速选共用 query）；过滤后仍带原始索引
+  function adminEntries(presets) {
+    const query = state.query.trim().toLowerCase();
+    return presets
+      .map((preset, index) => ({ preset, index }))
+      .filter(({ preset }) => matchesGroupFilter(preset))
+      .filter(
+        ({ preset }) =>
+          !query ||
+          String(preset.name).toLowerCase().includes(query) ||
+          String(preset.content).toLowerCase().includes(query) ||
+          String(preset.group || '').toLowerCase().includes(query),
+      );
+  }
+
   function adminListHTML(presets) {
     if (!presets.length) {
       return '<div class="empty">还没有预设消息。<br>点右上角「新增」创建第一条。</div>';
     }
-    const entries = presets
-      .map((preset, index) => ({ preset, index }))
-      .filter(({ preset }) => matchesGroupFilter(preset));
+    const entries = adminEntries(presets);
     if (!entries.length) {
-      return '<div class="empty">当前分组下没有预设。<br>切换顶栏分组，或点「+ 新增」加一条。</div>';
+      return state.query.trim()
+        ? `<div class="empty">没有匹配「${esc(state.query.trim())}」的预设。</div>`
+        : '<div class="empty">当前分组下没有预设。<br>切换顶栏分组，或点「+ 新增」加一条。</div>';
     }
     return `<div class="list">${entries
       .map(({ preset, index }) => {
@@ -585,6 +709,7 @@
           <div class="item-preview">${esc(oneLine(preset.content, 60))}</div>
           <div class="row" style="margin-top:6px">
             <button class="btn" type="button" data-action="edit" data-idx="${index}">编辑</button>
+            ${index > 0 ? `<button class="btn" type="button" data-action="top" data-idx="${index}">置顶</button>` : ''}
             <button class="btn danger" type="button" data-action="delete" data-idx="${index}">删除</button>
             <span class="spacer"></span>
             <span class="hint">${String(preset.content).length} 字${count ? ` · 附件 ${count}` : ''}</span>
@@ -595,11 +720,42 @@
   }
 
   function adminToolbar() {
+    const group = currentGroupFilter();
+    // 筛着某个分组时，先给一行「对本组」的操作
+    if (group) {
+      body.insertAdjacentHTML(
+        'afterbegin',
+        `<div class="row" style="margin-bottom:8px">
+          <span class="label">分组「${esc(group)}」</span>
+          <span class="spacer"></span>
+          <button class="btn" type="button" data-action="rename-group">重命名</button>
+          <button class="btn danger" type="button" data-action="delete-group">删除本组</button>
+        </div>`,
+      );
+    }
     const barHTML = `<button class="btn primary" type="button" data-action="new">+ 新增</button>
       <span class="spacer"></span>
-      <button class="btn" type="button" data-action="export">导出</button>
+      <button class="btn" type="button" data-action="export">${group ? '导出本组' : '导出'}</button>
       <button class="btn" type="button" data-action="import">导入</button>`;
     body.insertAdjacentHTML('afterbegin', `<div class="row" style="margin-bottom:8px">${barHTML}</div>`);
+  }
+
+  // 管理页底部的本地设置：悬浮球显隐、呼出快捷键
+  function adminSettings() {
+    body.insertAdjacentHTML(
+      'beforeend',
+      `<div class="row" style="margin-top:10px;border-top:1px solid #2e2f33;padding-top:8px">
+        <span class="label">悬浮球</span>
+        <span class="spacer"></span>
+        <button class="btn" type="button" data-action="toggle-ball">${state.ballHidden ? '显示悬浮球' : '隐藏悬浮球'}</button>
+      </div>
+      <div class="row">
+        <span class="label">快捷键</span>
+        <span class="spacer"></span>
+        <span class="kbd">${esc(hotkeyLabel(state.hotkey))}</span>
+        <button class="btn" type="button" data-action="edit-hotkey">${state.capturingHotkey ? '按下新组合…' : '修改'}</button>
+      </div>`,
+    );
   }
 
   /* ---------- 表单 ---------- */
@@ -710,6 +866,7 @@
         group = groupSelectField.value.trim().slice(0, LIMITS.groupMax);
       }
     }
+    if (group === UNGROUPED) return { error: `分组名不能是 ${UNGROUPED}（保留字，换一个）` };
 
     if (!name) return { error: '名称不能为空' };
     if (name.length > LIMITS.nameMax) return { error: `名称最多 ${LIMITS.nameMax} 字` };
@@ -799,36 +956,36 @@
 
     const list = loadPresets();
     list[index] = result.item;
-    savePresets(list);
+    if (!savePresets(list)) return setFieldError(STORAGE_FAILED);
     ensureSavedVisible([result.item]);
     finishSave(1, result.item.name);
   }
 
   // 新增模式：待保存一次性写入。表单里还有内容就先并进去——
-  // 填完直接点「保存」不点「添加」= 老的单条保存流程，行为不变
+  // 填完直接点「保存」不点「添加」= 老的单条保存流程，行为不变。
+  // 写入成功前不动 state.pending，否则写失败重试会误报「名称已存在」
   function saveNewBatch() {
+    let current = null;
     if (formHasInput()) {
       const result = readFormItem();
       if (result.error) return setFieldError(`${result.error}（这条不完整，未加入待保存）`);
       if (isDuplicateName(result.item, -1)) return setFieldError('名称已存在，换一个');
-      state.pending.push(result.item);
+      current = result.item;
     }
-    if (!state.pending.length) return setFieldError('名称不能为空');
+    if (!state.pending.length && !current) return setFieldError('名称不能为空');
 
     // 对存储再查一遍重名（添加时查过一次，这里防多标签页并发写入）
     const list = loadPresets();
+    const batch = current ? state.pending.concat(current) : state.pending.slice();
     const taken = new Set(list.map((preset) => preset.name));
-    for (const item of state.pending) {
+    for (const item of batch) {
       if (taken.has(item.name)) return setFieldError(`名称已存在：${oneLine(item.name, 16)}`);
       taken.add(item.name);
     }
 
-    list.push(...state.pending);
-    savePresets(list);
-    ensureSavedVisible(state.pending);
-    const count = state.pending.length;
-    const firstName = state.pending[0].name;
-    finishSave(count, firstName);
+    if (!savePresets(list.concat(batch))) return setFieldError(STORAGE_FAILED);
+    ensureSavedVisible(batch);
+    finishSave(batch.length, batch[0].name);
   }
 
   // 待保存区只重渲染自己这一块，不整表单重绘——否则输入框里的内容会丢
@@ -871,10 +1028,16 @@
         <textarea class="textarea" data-field="import" style="min-height:170px" placeholder='[{"name":"入服须知","content":"欢迎！本服规则……"}]' spellcheck="false"></textarea>
       </div>
       <div class="row">
+        <label class="row" style="gap:6px;cursor:pointer">
+          <input type="checkbox" data-role="overwrite" style="accent-color:#5865f2">
+          <span class="label">同名覆盖：用导入的内容替换已有预设</span>
+        </label>
+      </div>
+      <div class="row">
         <button class="btn primary" type="button" data-action="run-import">导入</button>
         <button class="btn" type="button" data-action="back">取消</button>
         <span class="spacer"></span>
-        <span class="hint">重名跳过 · 无效条目跳过 · 完成后给出计数</span>
+        <span class="hint">无效条目跳过 · 完成后给出计数</span>
       </div>
       <div class="row" style="margin-top:-4px"><span class="hint" data-role="error"></span></div>
     </div>`;
@@ -899,33 +1062,43 @@
   function runImport() {
     const text = readField('import').trim();
     if (!text) return setFieldError('先粘贴 JSON 或选择文件');
-    const result = importPresets(text);
+    const overwriteEl = body.querySelector('[data-role="overwrite"]');
+    const overwrite = !!(overwriteEl && overwriteEl.checked);
+    const result = importPresets(text, overwrite);
     if (!result.ok) {
       return setFieldError('导入失败：不是合法的 JSON 数组');
     }
+    if (!result.saved) return setFieldError(STORAGE_FAILED);
     state.mode = 'admin';
     state.editing = null;
     refreshChrome();
     renderBody();
-    showToast(`导入 ${result.added} 条 · 重复 ${result.duplicate} 条 · 无效 ${result.invalid} 条`);
+    showToast(
+      overwrite
+        ? `导入 ${result.added} 条（覆盖 ${result.updated} 条）· 无效 ${result.invalid} 条`
+        : `导入 ${result.added} 条 · 重复 ${result.duplicate} 条 · 无效 ${result.invalid} 条`,
+    );
   }
 
   function exportJson() {
-    const list = loadPresets();
+    const group = currentGroupFilter();
+    const list = loadPresets().filter((preset) => !group || preset.group === group);
     if (!list.length) {
-      showToast('当前没有可导出的预设');
+      showToast(group ? `「${oneLine(group, 12)}」组没有可导出的预设` : '当前没有可导出的预设');
       return;
     }
     const blob = new Blob([JSON.stringify(list, null, 2)], { type: 'application/json;charset=utf-8' });
     const url = URL.createObjectURL(blob);
     const anchor = document.createElement('a');
     anchor.href = url;
-    anchor.download = 'penguin-preset-messages.json';
+    // 分组名可能带文件名非法字符，导出前替换掉
+    const safeGroup = group.replace(/[\\/:*?"<>|]/g, '_');
+    anchor.download = group ? `penguin-preset-messages-${safeGroup}.json` : 'penguin-preset-messages.json';
     document.body.appendChild(anchor);
     anchor.click();
     anchor.remove();
     setTimeout(() => URL.revokeObjectURL(url), 1000);
-    showToast(`已导出 ${list.length} 条`);
+    showToast(group ? `已导出「${oneLine(group, 12)}」组 ${list.length} 条` : `已导出 ${list.length} 条`);
   }
 
   /* ---------- 填入 ---------- */
@@ -969,7 +1142,8 @@
       import: '导入 JSON',
     };
     title.textContent = titles[state.mode];
-    search.hidden = state.mode !== 'quick';
+    // 搜索框在速选与管理页都可用（共用同一个关键词）
+    search.hidden = state.mode !== 'quick' && state.mode !== 'admin';
     adminButton.hidden = state.mode !== 'quick';
     backButton.hidden = state.mode === 'quick';
     // closed shadow DOM 下 document.activeElement 只会是宿主元素，须查 shadow 根内部的焦点
@@ -1025,8 +1199,9 @@
     if (state.mode === 'admin') {
       body.innerHTML = adminListHTML(presets);
       adminToolbar();
-      const visible = presets.filter((preset) => matchesGroupFilter(preset)).length;
-      footer.textContent = state.groupFilter
+      adminSettings();
+      const visible = adminEntries(presets).length;
+      footer.textContent = state.groupFilter || state.query.trim()
         ? `${visible} / ${presets.length} 条预设 · Esc 返回速选`
         : `${presets.length} 条预设 · Esc 返回速选`;
       return;
@@ -1049,11 +1224,13 @@
     state.mode = 'quick';
     state.editing = null;
     state.pending = [];
+    state.capturingHotkey = false;
     state.query = '';
     state.cursor = 0;
     refreshChrome();
     renderBody();
     panel.hidden = false;
+    placePanel();
     setTimeout(() => {
       search.focus();
       search.select();
@@ -1072,10 +1249,20 @@
     else openPanel();
   }
 
+  // 只切 class、不重建列表：鼠标划过上百条预设时不再整表重绘
+  function setCursor(pos) {
+    if (pos === state.cursor) return;
+    state.cursor = pos;
+    for (const item of body.querySelectorAll('.item[data-pos]')) {
+      item.classList.toggle('active', Number(item.dataset.pos) === pos);
+    }
+    const active = body.querySelector('.item.active');
+    if (active) active.scrollIntoView({ block: 'nearest' });
+  }
+
   function moveCursor(delta) {
     if (!state.filtered.length) return;
-    state.cursor = (state.cursor + delta + state.filtered.length) % state.filtered.length;
-    renderBody();
+    setCursor((state.cursor + delta + state.filtered.length) % state.filtered.length);
     search.focus();
   }
 
@@ -1083,6 +1270,17 @@
     const entry = state.filtered[state.cursor];
     if (!entry) return;
     applyPreset(entry.index, state.cursor);
+  }
+
+  // 删除后的撤销：把条目插回原位置（期间已有同名条目则放弃）
+  function undoDelete(index, item) {
+    const list = loadPresets();
+    if (list.some((preset) => preset.name === item.name)) return showToast('撤销失败：已有同名预设');
+    list.splice(Math.min(index, list.length), 0, item);
+    if (!savePresets(list)) return showToast(STORAGE_FAILED);
+    refreshChrome();
+    renderBody();
+    showToast('已恢复');
   }
 
   /* ---------- 事件 ---------- */
@@ -1099,6 +1297,7 @@
       state.mode = state.mode === 'admin' ? 'quick' : 'admin';
       state.editing = null;
       state.pending = [];
+      state.capturingHotkey = false;
       refreshChrome();
       renderBody();
     },
@@ -1130,13 +1329,14 @@
     },
     delete: (index) => {
       const list = loadPresets();
-      if (!list[index]) return;
-      if (!window.confirm(`删除「${oneLine(list[index].name, 20)}」？删除后不可恢复。`)) return;
+      const item = list[index];
+      if (!item) return;
+      if (!window.confirm(`删除「${oneLine(item.name, 20)}」？删除后可在提示条上撤销。`)) return;
       list.splice(index, 1);
-      savePresets(list);
+      if (!savePresets(list)) return showToast(STORAGE_FAILED);
       refreshChrome();
       renderBody();
-      showToast('已删除');
+      showToast(`已删除「${oneLine(item.name, 16)}」`, { label: '撤销', onClick: () => undoDelete(index, item) }, 6000);
     },
     export: exportJson,
     import: () => {
@@ -1153,6 +1353,60 @@
     'add-pending': addPending,
     'pending-remove': removePending,
     'pending-clear': clearPending,
+    top: (index) => {
+      const list = loadPresets();
+      if (!list[index] || index === 0) return;
+      const [item] = list.splice(index, 1);
+      list.unshift(item);
+      if (!savePresets(list)) return showToast(STORAGE_FAILED);
+      refreshChrome();
+      renderBody();
+      showToast(`已置顶「${oneLine(item.name, 16)}」`);
+    },
+    'rename-group': () => {
+      const group = currentGroupFilter();
+      if (!group) return;
+      const input = window.prompt(`把「${group}」改名为（改到已有分组名即合并）：`, group);
+      if (input === null) return;
+      const next = input.trim().slice(0, LIMITS.groupMax);
+      if (!next || next === group) return;
+      if (next === UNGROUPED) return showToast(`分组名不能是 ${UNGROUPED}（保留字）`);
+      const list = loadPresets();
+      let count = 0;
+      for (const preset of list) {
+        if (preset.group === group) {
+          preset.group = next;
+          count++;
+        }
+      }
+      if (!savePresets(list)) return showToast(STORAGE_FAILED);
+      state.groupFilter = next;
+      store.write(GROUP_FILTER_KEY, next);
+      refreshChrome();
+      renderBody();
+      showToast(`已把「${oneLine(group, 12)}」的 ${count} 条改到「${oneLine(next, 12)}」`);
+    },
+    'delete-group': () => {
+      const group = currentGroupFilter();
+      if (!group) return;
+      const list = loadPresets();
+      const count = list.filter((preset) => preset.group === group).length;
+      if (!count) return;
+      if (!window.confirm(`删除「${oneLine(group, 20)}」组的 ${count} 条预设？删除后不可恢复，要留底先「导出本组」。`)) return;
+      if (!savePresets(list.filter((preset) => preset.group !== group))) return showToast(STORAGE_FAILED);
+      refreshChrome(); // 组没了，筛选会自动回落「全部」
+      renderBody();
+      showToast(`已删除「${oneLine(group, 12)}」组 ${count} 条`);
+    },
+    'toggle-ball': () => {
+      setBallHidden(!state.ballHidden);
+      renderBody();
+      showToast(state.ballHidden ? `悬浮球已隐藏，用 ${hotkeyLabel(state.hotkey)} 呼出面板` : '悬浮球已显示');
+    },
+    'edit-hotkey': () => {
+      state.capturingHotkey = true;
+      renderBody();
+    },
   };
 
   // 委托绑在 panel 上：顶栏（管理/返回/关闭）和内容区的按钮都要能收到
@@ -1229,11 +1483,7 @@
       if (state.mode !== 'quick') return;
       const item = event.target.closest('[data-pos]');
       if (!item) return;
-      const pos = Number(item.dataset.pos);
-      if (pos !== state.cursor) {
-        state.cursor = pos;
-        renderBody();
-      }
+      setCursor(Number(item.dataset.pos));
     },
     true,
   );
@@ -1255,6 +1505,31 @@
     ball.style.top = pos.y + 'px';
     ball.style.right = 'auto';
     ball.style.bottom = 'auto';
+  }
+
+  // 面板贴着悬浮球展开（球在哪一侧就开在哪一侧），并钳制在视口内
+  function placePanel() {
+    if (ball.hidden) {
+      // 球被隐藏时回到 CSS 默认的右下角
+      panel.style.left = '';
+      panel.style.top = '';
+      panel.style.right = '';
+      panel.style.bottom = '';
+      return;
+    }
+    const rect = ball.getBoundingClientRect();
+    const box = panel.getBoundingClientRect(); // 面板此刻必须已显示
+    const vw = window.innerWidth;
+    const vh = window.innerHeight;
+    const gap = 10;
+    let left = rect.left + rect.width / 2 > vw / 2 ? rect.right - box.width : rect.left;
+    left = Math.min(Math.max(8, left), Math.max(8, vw - box.width - 8));
+    let top = rect.top + rect.height / 2 > vh / 2 ? rect.top - gap - box.height : rect.bottom + gap;
+    top = Math.min(Math.max(8, top), Math.max(8, vh - box.height - 8));
+    panel.style.left = left + 'px';
+    panel.style.top = top + 'px';
+    panel.style.right = 'auto';
+    panel.style.bottom = 'auto';
   }
 
   let drag = null;
@@ -1281,6 +1556,7 @@
     if (moved) {
       const rect = ball.getBoundingClientRect();
       store.write(BALL_POS_KEY, { x: rect.left, y: rect.top });
+      if (state.open) placePanel();
     } else {
       togglePanel();
     }
@@ -1297,7 +1573,30 @@
   window.addEventListener(
     'keydown',
     (event) => {
-      if (event.altKey && !event.ctrlKey && !event.metaKey && event.code === 'KeyP') {
+      // 管理页正在录制新快捷键：按下任意带修饰键的组合即生效，Esc 取消
+      if (state.capturingHotkey && state.open && state.mode === 'admin') {
+        event.preventDefault();
+        event.stopPropagation();
+        if (event.key === 'Escape') {
+          state.capturingHotkey = false;
+          renderBody();
+          return;
+        }
+        // 只按修饰键本身不算
+        if (['Control', 'Alt', 'Shift', 'Meta'].includes(event.key)) return;
+        const combo = { alt: event.altKey, ctrl: event.ctrlKey, meta: event.metaKey, shift: event.shiftKey, code: event.code };
+        if (!combo.alt && !combo.ctrl && !combo.meta) {
+          showToast('快捷键至少要带 Alt / Ctrl / Cmd 之一');
+          return;
+        }
+        state.capturingHotkey = false;
+        saveHotkey(combo);
+        renderBody();
+        showToast(`快捷键已改为 ${hotkeyLabel(combo)}`);
+        return;
+      }
+
+      if (matchesHotkey(event, state.hotkey)) {
         event.preventDefault();
         event.stopPropagation();
         togglePanel();
@@ -1342,6 +1641,13 @@
       } else if (event.key === 'Enter') {
         event.preventDefault();
         pickCursor();
+      } else if (!state.query && !event.altKey && !event.ctrlKey && !event.metaKey && /^[1-9]$/.test(event.key)) {
+        // 搜索框空着时数字键直接填第 N 条；列表不够长就不拦，让数字照常进搜索框
+        const pos = Number(event.key) - 1;
+        if (pos < state.filtered.length) {
+          event.preventDefault();
+          applyPreset(state.filtered[pos].index, pos);
+        }
       }
     },
     true,
@@ -1374,16 +1680,23 @@
     );
   }
 
-  // 窗口缩小后球可能落在界外，缩放时重新钳制
+  // 窗口缩小后球可能落在界外，缩放时重新钳制；面板跟着重新贴边
   window.addEventListener('resize', () => {
     const rect = ball.getBoundingClientRect();
     placeBall(rect.left, rect.top);
+    if (state.open) placePanel();
   });
 
   /* ---------- 初始化 ---------- */
 
   const savedFilter = store.read(GROUP_FILTER_KEY, '');
   state.groupFilter = typeof savedFilter === 'string' ? savedFilter : '';
+
+  state.hotkey = loadHotkey();
+  updateBallTitle();
+
+  state.ballHidden = store.read(BALL_HIDDEN_KEY, false) === true;
+  ball.hidden = state.ballHidden;
 
   const savedPos = store.read(BALL_POS_KEY, null);
   if (savedPos && typeof savedPos.x === 'number' && typeof savedPos.y === 'number') {

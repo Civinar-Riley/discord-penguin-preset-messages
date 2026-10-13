@@ -22,6 +22,14 @@ node scripts/verify.mjs                                # 元信息头 / 版本 /
 
 本地加载：在 Tampermonkey 里点「+」，把 `discord-penguin-preset-messages.user.js` 的本地路径粘进去，然后刷新 discord.com 网页版。
 
+本地测试页（不需要 Discord 登录）：
+
+```bash
+node scripts/harness/server.mjs   # http://127.0.0.1:8756/test.html，加 ?hostile=1 模拟敌对事件环境
+```
+
+发版（维护者）：改动提交后跑 `node scripts/release.mjs`，它会自检、打 tag、推送并创建 GitHub Release；加 `--dry-run` 只打印步骤。
+
 ## 提交要求
 
 - 改脚本记得同步 `@version`、`CHANGELOG.md`、GitHub Release tag 三处
