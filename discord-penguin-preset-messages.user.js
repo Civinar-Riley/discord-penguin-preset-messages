@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         企鹅预设消息
 // @namespace    https://github.com/Civinar-Riley/discord-penguin-preset-messages
-// @version      0.4.0
+// @version      0.4.1
 // @description  把预设消息填进你自己的输入框，无需机器人、无需服务器权限
 // @author       企鹅预设消息
 // @match        https://discord.com/*
@@ -1507,8 +1507,12 @@
     ball.style.bottom = 'auto';
   }
 
-  // 面板贴着悬浮球展开（球在哪一侧就开在哪一侧），并钳制在视口内
+  // 面板贴着悬浮球展开（球在哪一侧就开在哪一侧），并保证整个面板留在视口内。
+  // 三条规则：优先贴球所在的那半屏 → 那边放不下就用另一边 → 两边都放不下就钳进视口
+  // （宁可压住球，也不能出屏）。贴球上方时用 bottom 锚定：面板随内容变长（切管理 /
+  // 表单、待保存增删）向上生长，不会像顶边锚定那样往下长、把底部按钮挤出屏幕。
   function placePanel() {
+    if (panel.hidden) return;
     if (ball.hidden) {
       // 球被隐藏时回到 CSS 默认的右下角
       panel.style.left = '';
@@ -1522,14 +1526,38 @@
     const vw = window.innerWidth;
     const vh = window.innerHeight;
     const gap = 10;
+    const margin = 8;
+
+    // 水平：球在右半屏右对齐，左半屏左对齐，再钳进视口
     let left = rect.left + rect.width / 2 > vw / 2 ? rect.right - box.width : rect.left;
-    left = Math.min(Math.max(8, left), Math.max(8, vw - box.width - 8));
-    let top = rect.top + rect.height / 2 > vh / 2 ? rect.top - gap - box.height : rect.bottom + gap;
-    top = Math.min(Math.max(8, top), Math.max(8, vh - box.height - 8));
+    left = Math.min(Math.max(margin, left), Math.max(margin, vw - box.width - margin));
     panel.style.left = left + 'px';
-    panel.style.top = top + 'px';
     panel.style.right = 'auto';
-    panel.style.bottom = 'auto';
+
+    // 垂直：先看球所在半屏那一边放不放得下
+    const room = { above: rect.top - gap - margin, below: vh - rect.bottom - gap - margin };
+    const preferAbove = rect.top + rect.height / 2 > vh / 2;
+    const first = preferAbove ? 'above' : 'below';
+    const second = preferAbove ? 'below' : 'above';
+    const side = room[first] >= box.height ? first : room[second] >= box.height ? second : '';
+
+    if (side === 'above') {
+      panel.style.bottom = Math.max(margin, vh - rect.top + gap) + 'px';
+      panel.style.top = 'auto';
+    } else if (side === 'below') {
+      panel.style.top = rect.bottom + gap + 'px';
+      panel.style.bottom = 'auto';
+    } else {
+      const top = Math.min(Math.max(margin, rect.bottom + gap), Math.max(margin, vh - box.height - margin));
+      panel.style.top = top + 'px';
+      panel.style.bottom = 'auto';
+    }
+  }
+
+  // 面板高度会随内容变化（切模式、待保存增删、报错文字换行），
+  // 尺寸一变就重新贴一次，保证整个面板始终在视口内
+  if (typeof ResizeObserver === 'function') {
+    new ResizeObserver(() => placePanel()).observe(panel);
   }
 
   let drag = null;
