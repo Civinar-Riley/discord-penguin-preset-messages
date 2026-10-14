@@ -1442,7 +1442,29 @@
     });
   }
 
-  search.addEventListener('input', () => {
+  // 单个数字字符的数值（全角「１」也算 1）；不是单个数字时返回 -1
+  function digitValue(text) {
+    if (text.length !== 1) return -1;
+    const code = text.charCodeAt(0);
+    const half = code >= 0xff10 && code <= 0xff19 ? code - 0xfee0 : code;
+    return half >= 0x31 && half <= 0x39 ? half - 0x30 : -1;
+  }
+
+  // 输入法提交的字符只能靠 input 事件接住：中文输入法下数字键的 keydown 是 'Process'，
+  // 全角模式下 key 是「１」，而且 preventDefault 挡不住随后提交进来的字符。所以让字符先
+  // 落进面板自己的搜索框——而不是在面板关掉、填入流程抢走焦点之后掉进 Discord 的输入框
+  // ——再就地丢掉并速填。只有粘贴 / 拖进来的数字不算（那是在搜索，不是按快捷键）；这里
+  // 用黑名单而不是白名单，是因为各家输入法提交时的 inputType 不完全一致。
+  const PASTE_LIKE_INPUT = new Set(['insertFromPaste', 'insertFromDrop']);
+  search.addEventListener('input', (event) => {
+    if (state.mode === 'quick' && !state.query && !PASTE_LIKE_INPUT.has(event.inputType)) {
+      const pos = digitValue(search.value) - 1;
+      if (pos >= 0 && pos < state.filtered.length) {
+        search.value = '';
+        applyPreset(state.filtered[pos].index, pos);
+        return;
+      }
+    }
     state.query = search.value;
     state.cursor = 0;
     renderBody();
@@ -1590,18 +1612,6 @@
     }
   });
 
-  // 数字键 `1`-`9` 对应的列表序号（0 起），不是数字键时返回 -1
-  //
-  // 判定以 event.code（物理键位）为准：中文输入法会把数字键吞成 key === 'Process'，
-  // 全角模式下 key 是「１」，两者都让 key 判定失效，而 code 始终是 Digit1-9。
-  // 小键盘交给 key 兜底——NumLock 关着时 Numpad1 的 key 是 End，不该触发速填。
-  function digitShortcutPos(event) {
-    if (event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return -1;
-    const byCode = /^Digit([1-9])$/.exec(event.code || '');
-    if (byCode) return Number(byCode[1]) - 1;
-    return /^[1-9]$/.test(event.key) ? Number(event.key) - 1 : -1;
-  }
-
   // 键盘处理（window 捕获阶段，先于页面在任何节点上注册的 keydown 监听）
   //
   // 面板是 closed shadow DOM：面板内部产生按键时，页面侧看到的 target 是宿主元素，
@@ -1647,17 +1657,6 @@
 
       if (event.target === host) event.stopImmediatePropagation();
 
-      // 数字速填要抢在输入法判断之前：输入法吞掉数字键时 key 已经不可用，只剩 code 可靠
-      if (state.mode === 'quick' && root.activeElement === search && !state.query) {
-        const pos = digitShortcutPos(event);
-        // 列表不够长就不拦，让数字照常进搜索框
-        if (pos >= 0 && pos < state.filtered.length) {
-          event.preventDefault();
-          applyPreset(state.filtered[pos].index, pos);
-          return;
-        }
-      }
-
       // 输入法组词中的按键（key 为 'Process'）不当作面板快捷键，回车选词不能误触发填入
       if (event.isComposing || event.key === 'Process') return;
 
@@ -1692,6 +1691,15 @@
       } else if (event.key === 'Enter') {
         event.preventDefault();
         pickCursor();
+      } else if (!state.query && !event.altKey && !event.ctrlKey && !event.metaKey && /^[1-9]$/.test(event.key)) {
+        // 搜索框空着时数字键直接填第 N 条；列表不够长就不拦，让数字照常进搜索框。
+        // 输入法吞掉数字键（key 为 'Process'、全角「１」）的情况 keydown 这边拦不住，
+        // preventDefault 也挡不住输入法提交字符，交给下面的 input 事件兜底
+        const pos = Number(event.key) - 1;
+        if (pos < state.filtered.length) {
+          event.preventDefault();
+          applyPreset(state.filtered[pos].index, pos);
+        }
       }
     },
     true,
