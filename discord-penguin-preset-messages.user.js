@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         企鹅预设消息
 // @namespace    https://github.com/Civinar-Riley/discord-penguin-preset-messages
-// @version      0.4.3
+// @version      0.4.4
 // @description  把预设消息填进你自己的输入框，无需机器人、无需服务器权限
 // @author       企鹅预设消息
 // @match        https://discord.com/*
@@ -1450,26 +1450,57 @@
     return half >= 0x31 && half <= 0x39 ? half - 0x30 : -1;
   }
 
-  // 输入法提交的字符只能靠 input 事件接住：中文输入法下数字键的 keydown 是 'Process'，
-  // 全角模式下 key 是「１」，而且 preventDefault 挡不住随后提交进来的字符。所以让字符先
-  // 落进面板自己的搜索框——而不是在面板关掉、填入流程抢走焦点之后掉进 Discord 的输入框
-  // ——再就地丢掉并速填。只有粘贴 / 拖进来的数字不算（那是在搜索，不是按快捷键）；这里
-  // 用黑名单而不是白名单，是因为各家输入法提交时的 inputType 不完全一致。
+  // 数字速填一律走这里，keydown 那边不再抢着填：
+  //
+  // 输入法（中文组词、全角）提交数字的时机比按键处理晚，而且 preventDefault 挡不住它。
+  // 只要在字符落地之前就填（= 关面板 + insertIntoInput 把焦点交给消息输入框），输入法随后
+  // 提交的那个字符就会掉进 Discord 的输入框，提示条却显示「已填入」。所以让数字先落进面板
+  // 自己的搜索框——空搜索框里只多了一个数字就速填，字符随面板一起丢掉。正在组词时还要等
+  // 组词结束再填，否则组词会跟着面板一起关掉、跑到别处去提交。
   const PASTE_LIKE_INPUT = new Set(['insertFromPaste', 'insertFromDrop']);
-  search.addEventListener('input', (event) => {
-    if (state.mode === 'quick' && !state.query && !PASTE_LIKE_INPUT.has(event.inputType)) {
-      const pos = digitValue(search.value) - 1;
-      if (pos >= 0 && pos < state.filtered.length) {
-        search.value = '';
-        applyPreset(state.filtered[pos].index, pos);
-        return;
-      }
-    }
+  let composing = false;
+  let beforeComposition = null; // 组词开始前的 { query, filtered }：组词期间列表不跟着拼音走，得留一份
+
+  // 搜索框里恰好一个数字 → 速填；list 是候选项（默认用当前过滤结果）
+  function fillByDigit(list = state.filtered) {
+    const pos = digitValue(search.value) - 1;
+    if (state.mode !== 'quick' || pos < 0 || pos >= list.length) return false;
+    search.value = '';
+    applyPreset(list[pos].index, pos);
+    return true;
+  }
+
+  function syncQuery() {
     state.query = search.value;
     state.cursor = 0;
     renderBody();
     search.focus();
     search.setSelectionRange(search.value.length, search.value.length);
+  }
+
+  search.addEventListener('compositionstart', () => {
+    composing = true;
+    beforeComposition = { query: state.query, filtered: state.filtered };
+  });
+
+  search.addEventListener('compositionend', () => {
+    composing = false;
+    const before = beforeComposition;
+    beforeComposition = null;
+    // 组词结束，字符这时才真正算落进搜索框：组词前是空的、现在只多一个数字 → 速填
+    if (before && before.query === '' && fillByDigit(before.filtered)) return;
+    syncQuery();
+  });
+
+  search.addEventListener('input', (event) => {
+    // 组词中既不过滤也不速填：拼音匹配不到中文，列表先别动，只把焦点按住别让 Discord 抢走
+    if (composing || event.isComposing) {
+      search.focus();
+      return;
+    }
+    // 粘贴 / 拖进来的数字不算按快捷键，是在搜索
+    if (!PASTE_LIKE_INPUT.has(event.inputType) && !state.query && fillByDigit()) return;
+    syncQuery();
   });
 
   // 顶栏分组筛选：过滤速选列表并记住选择；焦点交还搜索框，键盘流（↑↓/Enter）不中断
@@ -1691,15 +1722,6 @@
       } else if (event.key === 'Enter') {
         event.preventDefault();
         pickCursor();
-      } else if (!state.query && !event.altKey && !event.ctrlKey && !event.metaKey && /^[1-9]$/.test(event.key)) {
-        // 搜索框空着时数字键直接填第 N 条；列表不够长就不拦，让数字照常进搜索框。
-        // 输入法吞掉数字键（key 为 'Process'、全角「１」）的情况 keydown 这边拦不住，
-        // preventDefault 也挡不住输入法提交字符，交给下面的 input 事件兜底
-        const pos = Number(event.key) - 1;
-        if (pos < state.filtered.length) {
-          event.preventDefault();
-          applyPreset(state.filtered[pos].index, pos);
-        }
       }
     },
     true,
