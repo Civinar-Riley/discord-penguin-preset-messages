@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         企鹅预设消息
 // @namespace    https://github.com/Civinar-Riley/discord-penguin-preset-messages
-// @version      0.4.1
+// @version      0.4.2
 // @description  把预设消息填进你自己的输入框，无需机器人、无需服务器权限
 // @author       企鹅预设消息
 // @match        https://discord.com/*
@@ -1590,6 +1590,18 @@
     }
   });
 
+  // 数字键 `1`-`9` 对应的列表序号（0 起），不是数字键时返回 -1
+  //
+  // 判定以 event.code（物理键位）为准：中文输入法会把数字键吞成 key === 'Process'，
+  // 全角模式下 key 是「１」，两者都让 key 判定失效，而 code 始终是 Digit1-9。
+  // 小键盘交给 key 兜底——NumLock 关着时 Numpad1 的 key 是 End，不该触发速填。
+  function digitShortcutPos(event) {
+    if (event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return -1;
+    const byCode = /^Digit([1-9])$/.exec(event.code || '');
+    if (byCode) return Number(byCode[1]) - 1;
+    return /^[1-9]$/.test(event.key) ? Number(event.key) - 1 : -1;
+  }
+
   // 键盘处理（window 捕获阶段，先于页面在任何节点上注册的 keydown 监听）
   //
   // 面板是 closed shadow DOM：面板内部产生按键时，页面侧看到的 target 是宿主元素，
@@ -1635,6 +1647,17 @@
 
       if (event.target === host) event.stopImmediatePropagation();
 
+      // 数字速填要抢在输入法判断之前：输入法吞掉数字键时 key 已经不可用，只剩 code 可靠
+      if (state.mode === 'quick' && root.activeElement === search && !state.query) {
+        const pos = digitShortcutPos(event);
+        // 列表不够长就不拦，让数字照常进搜索框
+        if (pos >= 0 && pos < state.filtered.length) {
+          event.preventDefault();
+          applyPreset(state.filtered[pos].index, pos);
+          return;
+        }
+      }
+
       // 输入法组词中的按键（key 为 'Process'）不当作面板快捷键，回车选词不能误触发填入
       if (event.isComposing || event.key === 'Process') return;
 
@@ -1669,13 +1692,6 @@
       } else if (event.key === 'Enter') {
         event.preventDefault();
         pickCursor();
-      } else if (!state.query && !event.altKey && !event.ctrlKey && !event.metaKey && /^[1-9]$/.test(event.key)) {
-        // 搜索框空着时数字键直接填第 N 条；列表不够长就不拦，让数字照常进搜索框
-        const pos = Number(event.key) - 1;
-        if (pos < state.filtered.length) {
-          event.preventDefault();
-          applyPreset(state.filtered[pos].index, pos);
-        }
       }
     },
     true,
