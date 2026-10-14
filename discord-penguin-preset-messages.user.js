@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         企鹅预设消息
 // @namespace    https://github.com/Civinar-Riley/discord-penguin-preset-messages
-// @version      0.4.2
+// @version      0.4.3
 // @description  把预设消息填进你自己的输入框，无需机器人、无需服务器权限
 // @author       企鹅预设消息
 // @match        https://discord.com/*
