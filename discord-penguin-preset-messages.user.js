@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         企鹅预设消息
 // @namespace    https://github.com/Civinar-Riley/discord-penguin-preset-messages
-// @version      0.4.4
+// @version      0.4.5
 // @description  把预设消息填进你自己的输入框，无需机器人、无需服务器权限
 // @author       企鹅预设消息
 // @match        https://discord.com/*
@@ -98,7 +98,10 @@
 
   function loadPresets() {
     const raw = store.read(STORE_KEY, []);
-    return Array.isArray(raw) ? raw : [];
+    if (!Array.isArray(raw)) return [];
+    // 0.4.4 的多标签编辑可能写出带 null 空洞的数组：读取时直接丢掉坏条目，
+    // 否则渲染读 null.group 直接崩，面板永远打不开（顺带自愈已损坏的旧数据）
+    return raw.filter((item) => item && typeof item === 'object' && !Array.isArray(item));
   }
 
   function savePresets(list) {
@@ -223,12 +226,14 @@
   // 保持一致——能发送、能删除、发送后清空。execCommand 一族对 Discord 的
   // 模型完全不可见（文字看得见却发不出去也删不掉），不能作为填入手段。
   // Chrome 禁止构造 TextEvent，用 InputEvent 携带同名事件与 data。
-  // 返回值只表示「事件派发出去了」，不是「文字进没进去」——编辑器收字后要等
-  // 它自己的渲染提交，判定一律看 DOM（见 waitForEditorChange）。
+  // 返回「编辑器有没有接手这条事件」（preventDefault 与否）。它不能单独当
+  // 「文字已渲染」用——渲染时机不确定，仍要等 DOM——但它能证明文字已进模型，
+  // 足以决定要不要走兜底通路（见 insertIntoInput）。
   function textInsert(editor, text) {
     try {
-      editor.dispatchEvent(new InputEvent('textInput', { bubbles: true, cancelable: true, data: text }));
-      return true;
+      const event = new InputEvent('textInput', { bubbles: true, cancelable: true, data: text });
+      editor.dispatchEvent(event);
+      return event.defaultPrevented;
     } catch (_) {
       return false;
     }
@@ -289,28 +294,46 @@
 
   // 返回 { ok, via, reason }
   async function insertIntoInput(text) {
-    const editor = findEditor();
+    let editor = findEditor();
     if (!editor) return { ok: false, reason: 'no-editor' };
 
     const before = editorText(editor);
 
-    // 只有等到「DOM 确实没变」才换下一条通路：textInput 已经收下、只是渲染慢时
-    // 再派一次 paste，同一段文字会被插两遍
+    // 只有确认「编辑器没接手」才换下一条通路：接手了（preventDefault）只是渲染
+    // 还没提交，此时再派一次 paste，同一段文字会被插两遍
     editor.focus();
     caretToEnd(editor);
-    if (textInsert(editor, text) && (await waitForEditorChange(editor, before, INSERT_WAIT_MS))) {
+    if (textInsert(editor, text)) {
+      // 文字已进模型，等渲染进 DOM 做确认；等不到也不能换 paste 通路（会插两遍）
+      const changed = await waitForEditorChange(editor, before, INSERT_WAIT_MS + INSERT_LATE_MS);
+      if (changed) return { ok: true, via: 'textInput' };
+      // 到截止仍未渲染：节点被 React 换掉的话，接手的文字搁浅在旧节点里，
+      // 对当前节点重新派发一次；节点还在就信任接手信号（渲染只是迟到）
+      if (!editor.isConnected) {
+        editor = findEditor();
+        if (editor && textInsert(editor, text) && (await waitForEditorChange(editor, before, INSERT_WAIT_MS))) {
+          return { ok: true, via: 'textInput' };
+        }
+        return { ok: false, reason: 'insert-failed' };
+      }
       return { ok: true, via: 'textInput' };
     }
 
+    // textInput 没被接手。等待期间编辑器节点可能已被 React 换掉：重新定位，
+    // 别把 paste 发给已脱离文档的旧节点（那上面永远看不到文字）
+    editor = editor.isConnected ? editor : findEditor();
+    if (!editor) return { ok: false, reason: 'no-editor' };
+    const beforePaste = editorText(editor);
+
     editor.focus();
     caretToEnd(editor);
-    if (pasteInsert(editor, text) && (await waitForEditorChange(editor, before, INSERT_WAIT_MS))) {
+    if (pasteInsert(editor, text) && (await waitForEditorChange(editor, beforePaste, INSERT_WAIT_MS))) {
       return { ok: true, via: 'paste' };
     }
 
-    // 两条通路都没等到变化：也可能只是渲染比上限还慢，再宽限一段再报失败。
+    // 兜底通路之后也没等到变化：可能只是渲染比上限还慢，再宽限一段再报失败。
     // 文字明明进去了却弹「填入失败」，比多等一会儿更难向用户解释
-    if (await waitForEditorChange(editor, before, INSERT_LATE_MS)) return { ok: true, via: 'paste' };
+    if (await waitForEditorChange(editor, beforePaste, INSERT_LATE_MS)) return { ok: true, via: 'paste' };
 
     return { ok: false, reason: 'insert-failed' };
   }
@@ -609,7 +632,8 @@
   const state = {
     open: false,
     mode: 'quick', // quick | admin | form | import
-    editing: null, // 'new' | 索引字符串 | null
+    editing: null, // 'new' | 'edit' | null
+    editingName: null, // 编辑模式的定位凭据：打开表单时的原条目名（名称唯一）
     pending: [], // 新增模式的待保存条目（只在内存里，保存时才落存储）
     query: '',
     groupFilter: '', // '' = 全部；UNGROUPED = 未分组；其余为分组名
@@ -762,9 +786,18 @@
 
   function formHTML(presets) {
     const isEdit = state.editing !== 'new';
-    const index = isEdit ? Number(state.editing) : -1;
-    const preset = isEdit ? presets[index] || { name: '', content: '', attachments: [] } : { name: '', content: '', attachments: [] };
-    const heading = isEdit ? `编辑预设 · ${index + 1} / ${presets.length}` : '新增预设';
+    // 编辑目标按名称定位：表单打开期间列表可能在别处（其他标签页、撤销、置顶）
+    // 被增删过，旧下标指向的已不是当初那条
+    const found = isEdit && state.editingName
+      ? presets.findIndex((preset) => preset && preset.name === state.editingName)
+      : -1;
+    const empty = { name: '', content: '', attachments: [] };
+    const preset = found >= 0 ? presets[found] : empty;
+    const heading = !isEdit
+      ? '新增预设'
+      : found >= 0
+        ? `编辑预设 · ${found + 1} / ${presets.length}`
+        : '编辑预设（原条目已不存在）';
     const attachText = (preset.attachments || []).join('\n');
     const groups = deriveGroups(presets);
     // 新增时管理页正筛着某个分组 → 默认归到该分组，省一次选择
@@ -819,7 +852,7 @@
       </div>
       <div class="field">
         <span class="label">内容（${LIMITS.contentMax} 字以内，支持换行）</span>
-        <textarea class="textarea" data-field="content" maxlength="${LIMITS.contentMax}" placeholder="要填入输入框的文字">${esc(preset.content)}</textarea>
+        <textarea class="textarea" data-field="content" maxlength="${LIMITS.contentMax}" placeholder="要填入输入框的文字">${'\n'}${esc(preset.content)}</textarea>
       </div>
       <div class="field">
         <span class="label">附件链接（每行一个，最多 ${LIMITS.attachmentMax} 个，可留空）</span>
@@ -882,11 +915,11 @@
     return { item };
   }
 
-  // 表单里是否填了东西：「保存」用它判断当前这条要不要一起带上
+  // 表单里是否填了东西：「保存」用它判断当前这条要不要一起带上。
+  // 分组不算：新增模式「添加」会刻意保留分组选择（连着录同一组的多条），
+  // 残留的分组名不代表还有下一条草稿——把它算进去，保存整批时会误报「名称不能为空」
   function formHasInput() {
-    if (readField('name').trim() || readField('content').trim() || readField('attachments').trim()) return true;
-    const groupNewInput = body.querySelector('[data-field="group-new"]');
-    return !!(groupNewInput && groupNewInput.style.display !== 'none' && groupNewInput.value.trim());
+    return !!(readField('name').trim() || readField('content').trim() || readField('attachments').trim());
   }
 
   // 重名检查：对已存预设与待保存列表都不许重名；skipIndex 供编辑时跳过自身
@@ -942,6 +975,7 @@
 
   function finishSave(count, name) {
     state.editing = null;
+    state.editingName = null;
     state.pending = [];
     state.mode = 'admin';
     refreshChrome();
@@ -949,13 +983,20 @@
     showToast(count === 1 ? `已保存「${oneLine(name, 16)}」` : `已保存 ${count} 条预设`);
   }
 
-  function saveEditForm(index) {
+  function saveEditForm() {
     const result = readFormItem();
     if (result.error) return setFieldError(result.error);
-    if (isDuplicateName(result.item, index)) return setFieldError('名称已存在，换一个');
 
+    // 保存时重新按名称定位：表单打开的这段时间里，列表可能已被其他标签页
+    // 置顶 / 删除过，按下标覆盖会写错条目、甚至写出带 null 空洞的数组
     const list = loadPresets();
-    list[index] = result.item;
+    const at = state.editingName
+      ? list.findIndex((preset) => preset && preset.name === state.editingName)
+      : -1;
+    if (at < 0) return setFieldError('原预设已不存在（可能在其他标签页被改动），请返回列表重试');
+    if (isDuplicateName(result.item, at)) return setFieldError('名称已存在，换一个');
+
+    list[at] = result.item;
     if (!savePresets(list)) return setFieldError(STORAGE_FAILED);
     ensureSavedVisible([result.item]);
     finishSave(1, result.item.name);
@@ -1071,6 +1112,7 @@
     if (!result.saved) return setFieldError(STORAGE_FAILED);
     state.mode = 'admin';
     state.editing = null;
+    state.editingName = null;
     refreshChrome();
     renderBody();
     showToast(
@@ -1223,6 +1265,7 @@
     state.open = true;
     state.mode = 'quick';
     state.editing = null;
+    state.editingName = null;
     state.pending = [];
     state.capturingHotkey = false;
     state.query = '';
@@ -1272,14 +1315,17 @@
     applyPreset(entry.index, state.cursor);
   }
 
-  // 删除后的撤销：把条目插回原位置（期间已有同名条目则放弃）
+  // 删除后的撤销：把条目插回原位置（期间已有同名条目则放弃）。
+  // 提示条挂在 root 上、不随视图切换消失，点撤销时可能正停在表单 / 导入页、
+  // 甚至正写着草稿：只刷 chrome，列表视图才重绘，表单里的输入一律不碰
   function undoDelete(index, item) {
     const list = loadPresets();
     if (list.some((preset) => preset.name === item.name)) return showToast('撤销失败：已有同名预设');
     list.splice(Math.min(index, list.length), 0, item);
     if (!savePresets(list)) return showToast(STORAGE_FAILED);
+    ensureSavedVisible([item]);
     refreshChrome();
-    renderBody();
+    if (state.mode === 'quick' || state.mode === 'admin') renderBody();
     showToast('已恢复');
   }
 
@@ -1289,6 +1335,7 @@
     'toggle-admin': () => {
       state.mode = 'admin';
       state.editing = null;
+      state.editingName = null;
       refreshChrome();
       renderBody();
     },
@@ -1296,6 +1343,7 @@
       if (state.mode === 'form' && !confirmDiscardPending()) return;
       state.mode = state.mode === 'admin' ? 'quick' : 'admin';
       state.editing = null;
+      state.editingName = null;
       state.pending = [];
       state.capturingHotkey = false;
       refreshChrome();
@@ -1316,13 +1364,17 @@
     new: () => {
       state.mode = 'form';
       state.editing = 'new';
+      state.editingName = null;
       state.pending = [];
       refreshChrome();
       renderBody();
     },
     edit: (index) => {
+      const item = loadPresets()[index];
+      if (!item) return;
       state.mode = 'form';
-      state.editing = String(index);
+      state.editing = 'edit';
+      state.editingName = item.name;
       state.pending = [];
       refreshChrome();
       renderBody();
@@ -1332,32 +1384,44 @@
       const item = list[index];
       if (!item) return;
       if (!window.confirm(`删除「${oneLine(item.name, 20)}」？删除后可在提示条上撤销。`)) return;
-      list.splice(index, 1);
-      if (!savePresets(list)) return showToast(STORAGE_FAILED);
+      // 确认弹窗期间列表可能已被其他标签页改过：按名称重新定位，别按旧下标删
+      const fresh = loadPresets();
+      const at = fresh.findIndex((preset) => preset && preset.name === item.name);
+      if (at < 0) {
+        renderBody();
+        return showToast(`「${oneLine(item.name, 16)}」已被删除`);
+      }
+      fresh.splice(at, 1);
+      if (!savePresets(fresh)) return showToast(STORAGE_FAILED);
       refreshChrome();
       renderBody();
-      showToast(`已删除「${oneLine(item.name, 16)}」`, { label: '撤销', onClick: () => undoDelete(index, item) }, 6000);
+      showToast(`已删除「${oneLine(item.name, 16)}」`, { label: '撤销', onClick: () => undoDelete(at, item) }, 6000);
     },
     export: exportJson,
     import: () => {
       state.mode = 'import';
       state.editing = null;
+      state.editingName = null;
       refreshChrome();
       renderBody();
     },
     'run-import': runImport,
     save: () => {
       if (state.editing === 'new') saveNewBatch();
-      else saveEditForm(Number(state.editing));
+      else saveEditForm();
     },
     'add-pending': addPending,
     'pending-remove': removePending,
     'pending-clear': clearPending,
     top: (index) => {
       const list = loadPresets();
-      if (!list[index] || index === 0) return;
-      const [item] = list.splice(index, 1);
-      list.unshift(item);
+      const item = list[index];
+      if (!item) return;
+      // 按名称重新定位（渲染和点击之间列表可能已被其他标签页改过）
+      const at = list.findIndex((preset) => preset && preset.name === item.name);
+      if (at <= 0) return;
+      const [moved] = list.splice(at, 1);
+      list.unshift(moved);
       if (!savePresets(list)) return showToast(STORAGE_FAILED);
       refreshChrome();
       renderBody();
@@ -1400,6 +1464,11 @@
     },
     'toggle-ball': () => {
       setBallHidden(!state.ballHidden);
+      if (!state.ballHidden) {
+        // 重新显示时按当前矩形钳回视口：隐藏期间窗口可能缩过
+        const rect = ball.getBoundingClientRect();
+        placeBall(rect.left, rect.top);
+      }
       renderBody();
       showToast(state.ballHidden ? `悬浮球已隐藏，用 ${hotkeyLabel(state.hotkey)} 呼出面板` : '悬浮球已显示');
     },
@@ -1471,11 +1540,15 @@
   }
 
   function syncQuery() {
+    // 先记下光标位置：renderBody 不碰搜索框，结束后把光标放回原地。
+    // 不能强制跳到末尾——在关键词中间插入 / 退格时，字符会落到错误的位置
+    const start = search.selectionStart;
+    const end = search.selectionEnd;
     state.query = search.value;
     state.cursor = 0;
     renderBody();
     search.focus();
-    search.setSelectionRange(search.value.length, search.value.length);
+    search.setSelectionRange(start, end);
   }
 
   search.addEventListener('compositionstart', () => {
@@ -1630,18 +1703,24 @@
     placeBall(drag.originX + dx, drag.originY + dy);
   });
 
-  window.addEventListener('mouseup', () => {
-    if (!drag) return;
-    const moved = drag.moved;
-    drag = null;
-    if (moved) {
-      const rect = ball.getBoundingClientRect();
-      store.write(BALL_POS_KEY, { x: rect.left, y: rect.top });
-      if (state.open) placePanel();
-    } else {
-      togglePanel();
-    }
-  });
+  // 结束拖拽必须挂捕获阶段：root 冒泡阶段的鼠标盾只放行球本身，拖到面板上
+  // 松手时 mouseup 被拦在到达 window 冒泡监听之前，drag 清不掉，球会粘在鼠标上
+  window.addEventListener(
+    'mouseup',
+    () => {
+      if (!drag) return;
+      const moved = drag.moved;
+      drag = null;
+      if (moved) {
+        const rect = ball.getBoundingClientRect();
+        store.write(BALL_POS_KEY, { x: rect.left, y: rect.top });
+        if (state.open) placePanel();
+      } else {
+        togglePanel();
+      }
+    },
+    true,
+  );
 
   // 键盘处理（window 捕获阶段，先于页面在任何节点上注册的 keydown 监听）
   //
@@ -1698,6 +1777,7 @@
           if (state.mode === 'form' && !confirmDiscardPending()) return;
           state.mode = 'admin';
           state.editing = null;
+          state.editingName = null;
           state.pending = [];
           refreshChrome();
           renderBody();
@@ -1754,10 +1834,13 @@
     );
   }
 
-  // 窗口缩小后球可能落在界外，缩放时重新钳制；面板跟着重新贴边
+  // 窗口缩小后球可能落在界外，缩放时重新钳制；面板跟着重新贴边。
+  // 球隐藏时矩形全是 0，不能拿来当位置——否则隐藏期间一缩放，再显示就跑到左上角
   window.addEventListener('resize', () => {
-    const rect = ball.getBoundingClientRect();
-    placeBall(rect.left, rect.top);
+    if (!ball.hidden) {
+      const rect = ball.getBoundingClientRect();
+      placeBall(rect.left, rect.top);
+    }
     if (state.open) placePanel();
   });
 
