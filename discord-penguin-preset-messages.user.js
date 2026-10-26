@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         企鹅预设消息
 // @namespace    https://github.com/Civinar-Riley/discord-penguin-preset-messages
-// @version      0.4.5
+// @version      0.4.6
 // @description  把预设消息填进你自己的输入框，无需机器人、无需服务器权限
 // @author       企鹅预设消息
 // @match        https://discord.com/*
@@ -108,7 +108,7 @@
     return store.write(STORE_KEY, list);
   }
 
-  // 有效 → 返回归一化对象；'invalid' 无效条目
+  // 有效 → 返回归一化对象；'invalid' 格式无效；{ tooLong: true } 正文加附件超出单条上限
   function normalizePreset(item) {
     if (!item || typeof item !== 'object' || Array.isArray(item)) return 'invalid';
 
@@ -128,6 +128,11 @@
       }
       attachments = item.attachments;
     }
+
+    // 正文加附件链接行超出单条上限：条目留在库里也发不出去，按无效处理。
+    // 旧版本导出的文件可能正好落在这个缝里，所以要单独计数（见 importPresets），
+    // 让用户知道是「哪几条太长」而不是笼统的「格式不对」
+    if (messageLength(content, attachments) > LIMITS.contentMax) return { tooLong: true };
 
     let group;
     if (typeof item.group === 'string') {
@@ -156,11 +161,16 @@
     let updated = 0;
     let duplicate = 0;
     let invalid = 0;
+    let tooLong = 0;
 
     for (const raw of parsed) {
       const preset = normalizePreset(raw);
       if (preset === 'invalid') {
         invalid++;
+        continue;
+      }
+      if (preset && preset.tooLong) {
+        tooLong++;
         continue;
       }
       const index = list.findIndex((existing) => existing.name === preset.name);
@@ -177,7 +187,21 @@
       added++;
     }
 
-    return { ok: true, added, updated, duplicate, invalid, saved: savePresets(list) };
+    return { ok: true, added, updated, duplicate, invalid, tooLong, saved: savePresets(list) };
+  }
+
+  // 附件链接以链接行追加在正文后
+  function composeMessage(preset) {
+    const parts = [preset.content];
+    if (Array.isArray(preset.attachments) && preset.attachments.length) {
+      parts.push(preset.attachments.join('\n'));
+    }
+    return parts.join('\n');
+  }
+
+  // 填入的是正文 + 附件链接行，Discord 按整条消息算 2000 字上限
+  function messageLength(content, attachments) {
+    return composeMessage({ content, attachments }).length;
   }
 
   /* ================================================================
@@ -338,15 +362,6 @@
     return { ok: false, reason: 'insert-failed' };
   }
 
-  // 附件链接以链接行追加在正文后
-  function composeMessage(preset) {
-    const parts = [preset.content];
-    if (Array.isArray(preset.attachments) && preset.attachments.length) {
-      parts.push(preset.attachments.join('\n'));
-    }
-    return parts.join('\n');
-  }
-
   /* ================================================================
    * 界面
    * ================================================================ */
@@ -426,6 +441,7 @@
     .input:focus, .textarea:focus { border-color: #5865f2; }
     .textarea { resize: vertical; min-height: 96px; }
     .hint { color: #80848e; font-size: 11px; }
+    .hint.over { color: #fa7575; }
     .error { color: #fa7575; font-size: 12px; }
 
     .pending { display: flex; flex-direction: column; gap: 6px; border-top: 1px solid #2e2f33; padding-top: 8px; }
@@ -659,8 +675,10 @@
 
   function quickHTML(presets) {
     const query = state.query.trim().toLowerCase();
+    // 只留条目本身：列表下标是渲染那一刻的快照，别的标签页一增删就失效，
+    // 点击 / 速填一律按名称回存储里重新取（见 applyPreset）
     state.filtered = presets
-      .map((preset, index) => ({ preset, index }))
+      .map((preset) => ({ preset }))
       .filter(({ preset }) => matchesGroupFilter(preset))
       .filter(
         ({ preset }) =>
@@ -681,9 +699,9 @@
     // 筛着某个分组时组徽标是冗余的，只在「全部 / 未分组」下显示
     const showGroup = !state.groupFilter;
     return `<div class="list">${state.filtered
-      .map(({ preset, index }, pos) => {
+      .map(({ preset }, pos) => {
         const active = pos === state.cursor;
-        return `<div class="item${active ? ' active' : ''}" data-idx="${index}" data-pos="${pos}">
+        return `<div class="item${active ? ' active' : ''}" data-name="${esc(preset.name)}" data-pos="${pos}">
           <div class="item-name">${esc(preset.name)}${showGroup && preset.group ? `<span class="kbd">${esc(preset.group)}</span>` : ''}<span class="kbd kbd-hint">Enter</span></div>
           <div class="item-preview">${esc(oneLine(preset.content, 60))}</div>
           ${attachmentMeta(preset)}
@@ -728,13 +746,16 @@
     return `<div class="list">${entries
       .map(({ preset, index }) => {
         const count = Array.isArray(preset.attachments) ? preset.attachments.length : 0;
+        // 按钮带条目名而不是数组下标：渲染到点击之间别的标签页可能增删过，
+        // 下标会指向另一条（编辑 / 删除错的预设）；置顶按钮只按「是否已在首位」显示
+        const name = esc(preset.name);
         return `<div class="item">
-          <div class="item-name">${esc(preset.name)}${preset.group ? `<span class="kbd">${esc(preset.group)}</span>` : ''}</div>
+          <div class="item-name">${name}${preset.group ? `<span class="kbd">${esc(preset.group)}</span>` : ''}</div>
           <div class="item-preview">${esc(oneLine(preset.content, 60))}</div>
           <div class="row" style="margin-top:6px">
-            <button class="btn" type="button" data-action="edit" data-idx="${index}">编辑</button>
-            ${index > 0 ? `<button class="btn" type="button" data-action="top" data-idx="${index}">置顶</button>` : ''}
-            <button class="btn danger" type="button" data-action="delete" data-idx="${index}">删除</button>
+            <button class="btn" type="button" data-action="edit" data-name="${name}">编辑</button>
+            ${index > 0 ? `<button class="btn" type="button" data-action="top" data-name="${name}">置顶</button>` : ''}
+            <button class="btn danger" type="button" data-action="delete" data-name="${name}">删除</button>
             <span class="spacer"></span>
             <span class="hint">${String(preset.content).length} 字${count ? ` · 附件 ${count}` : ''}</span>
           </div>
@@ -858,6 +879,7 @@
         <span class="label">附件链接（每行一个，最多 ${LIMITS.attachmentMax} 个，可留空）</span>
         <textarea class="textarea" data-field="attachments" style="min-height:64px" placeholder="https://example.com/a.png" spellcheck="false">${esc(attachText)}</textarea>
       </div>
+      <div class="row"><span class="hint" data-role="length"></span></div>
       ${actionRowHTML}
     </div>`;
   }
@@ -870,6 +892,22 @@
   function setFieldError(message) {
     const slot = body.querySelector('[data-role="error"]');
     if (slot) slot.textContent = message;
+  }
+
+  // 正文 + 附件链接行的合计字数实时提示。超限时变红：Discord 按整条消息算上限，
+  // 正文自己没超、加上链接就超的情况必须当场看见，不能等按回车才发现发不出去
+  function updateLengthHint() {
+    const slot = body.querySelector('[data-role="length"]');
+    if (!slot) return;
+    const content = readField('content');
+    const attachments = readField('attachments')
+      .split('\n')
+      .map((line) => line.trim())
+      .filter(Boolean);
+    const total = messageLength(content, attachments);
+    const linkCount = attachments.length ? `（含 ${attachments.length} 个附件链接）` : '';
+    slot.textContent = `合计 ${total} / ${LIMITS.contentMax} 字${linkCount}`;
+    slot.classList.toggle('over', total > LIMITS.contentMax);
   }
 
   function focusForm() {
@@ -904,10 +942,19 @@
     if (!name) return { error: '名称不能为空' };
     if (name.length > LIMITS.nameMax) return { error: `名称最多 ${LIMITS.nameMax} 字` };
     if (!content.trim()) return { error: '内容不能为空' };
-    if (content.length > LIMITS.contentMax) return { error: `内容最多 ${LIMITS.contentMax} 字` };
     if (attachments.length > LIMITS.attachmentMax) return { error: `附件最多 ${LIMITS.attachmentMax} 个` };
     const badUrl = attachments.find((url) => !URL_RE.test(url));
     if (badUrl) return { error: `附件必须是 http(s) 链接：${oneLine(badUrl, 40)}` };
+
+    // 正文和附件链接行是拼成一条消息填入的，总长按 Discord 的单条上限算
+    const total = messageLength(content, attachments);
+    if (total > LIMITS.contentMax) {
+      return {
+        error: attachments.length
+          ? `正文加附件链接共 ${total} 字，超出单条 ${LIMITS.contentMax} 字上限（正文 ${content.length} 字 + 链接 ${total - content.length} 字）`
+          : `内容最多 ${LIMITS.contentMax} 字（当前 ${total} 字）`,
+      };
+    }
 
     const item = { name, content };
     if (attachments.length) item.attachments = attachments;
@@ -1009,7 +1056,8 @@
     let current = null;
     if (formHasInput()) {
       const result = readFormItem();
-      if (result.error) return setFieldError(`${result.error}（这条不完整，未加入待保存）`);
+      // 后缀只说「没并入待保存」，不断言原因：校验失败既可能是没填完，也可能是超长
+      if (result.error) return setFieldError(`${result.error}（这条未加入待保存）`);
       if (isDuplicateName(result.item, -1)) return setFieldError('名称已存在，换一个');
       current = result.item;
     }
@@ -1115,10 +1163,13 @@
     state.editingName = null;
     refreshChrome();
     renderBody();
+    // 超长条目单独报一句：它格式是好的，只是正文加附件链接超过单条上限，
+    // 混在「无效」里用户会以为自己写坏了 JSON
+    const tooLongNote = result.tooLong ? ` · 正文加附件超 ${LIMITS.contentMax} 字 ${result.tooLong} 条` : '';
     showToast(
-      overwrite
+      (overwrite
         ? `导入 ${result.added} 条（覆盖 ${result.updated} 条）· 无效 ${result.invalid} 条`
-        : `导入 ${result.added} 条 · 重复 ${result.duplicate} 条 · 无效 ${result.invalid} 条`,
+        : `导入 ${result.added} 条 · 重复 ${result.duplicate} 条 · 无效 ${result.invalid} 条`) + tooLongNote,
     );
   }
 
@@ -1145,9 +1196,18 @@
 
   /* ---------- 填入 ---------- */
 
-  async function applyPreset(index, pos) {
-    const preset = loadPresets()[index];
-    if (!preset) return;
+  // 按名称取当前存储里的那一条。列表渲染到点击之间，别的标签页可能已经增删过，
+  // 用渲染时的数组下标取会摸到另一条预设（填入错的文字比什么都不填更糟）
+  function findByName(list, name) {
+    return list.find((preset) => preset && preset.name === name) || null;
+  }
+
+  async function applyPreset(name, pos) {
+    const preset = typeof name === 'string' ? findByName(loadPresets(), name) : null;
+    if (!preset) {
+      closePanel();
+      return showToast('这条预设已不存在（可能在其他标签页被删除）');
+    }
     if (typeof pos === 'number') state.cursor = pos;
 
     // 先把面板关掉再填入：填入要等编辑器渲染（最坏近一秒），面板顶着不关既挡
@@ -1253,6 +1313,7 @@
       body.innerHTML = formHTML(presets);
       footer.textContent = isEdit ? 'Enter 不能提交，请点「保存」' : '「添加」继续加下一条，「保存」一起写入';
       if (!isEdit) renderPending();
+      updateLengthHint();
       focusForm();
       return;
     }
@@ -1280,8 +1341,17 @@
     }, 0);
   }
 
+  // 「有没有还没落库的输入」：待保存批次、表单里填了一半的条目、导入页粘的 JSON。
+  // 点面板外面、按快捷键、点 ✕ 都会走到这里——不先问一句，一次误触就把草稿清空
+  function hasUnsavedDraft() {
+    if (state.mode === 'form' && formHasInput()) return true;
+    if (state.mode === 'import' && readField('import').trim()) return true;
+    return false;
+  }
+
   function closePanel() {
     if (!confirmDiscardPending()) return;
+    if (hasUnsavedDraft() && !window.confirm('面板里还有没保存的内容，放弃并收起？')) return;
     state.pending = [];
     state.open = false;
     panel.hidden = true;
@@ -1312,7 +1382,7 @@
   function pickCursor() {
     const entry = state.filtered[state.cursor];
     if (!entry) return;
-    applyPreset(entry.index, state.cursor);
+    applyPreset(entry.preset.name, state.cursor);
   }
 
   // 删除后的撤销：把条目插回原位置（期间已有同名条目则放弃）。
@@ -1369,9 +1439,9 @@
       refreshChrome();
       renderBody();
     },
-    edit: (index) => {
-      const item = loadPresets()[index];
-      if (!item) return;
+    edit: (name) => {
+      const item = findByName(loadPresets(), name);
+      if (!item) return showToast('这条预设已不存在（可能在其他标签页被删除）');
       state.mode = 'form';
       state.editing = 'edit';
       state.editingName = item.name;
@@ -1379,10 +1449,12 @@
       refreshChrome();
       renderBody();
     },
-    delete: (index) => {
-      const list = loadPresets();
-      const item = list[index];
-      if (!item) return;
+    delete: (name) => {
+      const item = findByName(loadPresets(), name);
+      if (!item) {
+        renderBody();
+        return showToast('这条预设已不存在（可能在其他标签页被删除）');
+      }
       if (!window.confirm(`删除「${oneLine(item.name, 20)}」？删除后可在提示条上撤销。`)) return;
       // 确认弹窗期间列表可能已被其他标签页改过：按名称重新定位，别按旧下标删
       const fresh = loadPresets();
@@ -1413,19 +1485,16 @@
     'add-pending': addPending,
     'pending-remove': removePending,
     'pending-clear': clearPending,
-    top: (index) => {
+    top: (name) => {
       const list = loadPresets();
-      const item = list[index];
-      if (!item) return;
-      // 按名称重新定位（渲染和点击之间列表可能已被其他标签页改过）
-      const at = list.findIndex((preset) => preset && preset.name === item.name);
+      const at = list.findIndex((preset) => preset && preset.name === name);
       if (at <= 0) return;
       const [moved] = list.splice(at, 1);
       list.unshift(moved);
       if (!savePresets(list)) return showToast(STORAGE_FAILED);
       refreshChrome();
       renderBody();
-      showToast(`已置顶「${oneLine(item.name, 16)}」`);
+      showToast(`已置顶「${oneLine(moved.name, 16)}」`);
     },
     'rename-group': () => {
       const group = currentGroupFilter();
@@ -1485,15 +1554,16 @@
     const actionEl = event.target.closest('[data-action]');
     if (actionEl) {
       event.preventDefault();
-      const index = actionEl.dataset.idx !== undefined ? Number(actionEl.dataset.idx) : undefined;
+      // 条目相关的动作带 data-name（条目名，稳定标识）；待保存区按位置操作，仍用 data-idx
+      const target = actionEl.dataset.name !== undefined ? actionEl.dataset.name : Number(actionEl.dataset.idx);
       const handler = actions[actionEl.dataset.action];
-      if (handler) handler(index);
+      if (handler) handler(target);
       return;
     }
 
     if (state.mode === 'quick') {
-      const item = event.target.closest('[data-idx]');
-      if (item) applyPreset(Number(item.dataset.idx), Number(item.dataset.pos));
+      const item = event.target.closest('[data-name]');
+      if (item) applyPreset(item.dataset.name, Number(item.dataset.pos));
     }
   });
 
@@ -1510,6 +1580,23 @@
       event.stopPropagation();
     });
   }
+
+  // 点面板外部收起。判定用 composedPath 看事件路径里有没有宿主元素：面板、悬浮球、
+  // 提示条都长在宿主的 shadow 树里，路径里一定带着 host——这些一律放行。
+  // 这样悬浮球不会被双重处理（球自己的按下 → mouseup → togglePanel 管开关，
+  // 这里再关一次就成了「关了又开」），面板里的按钮、输入框、提示条上的「撤销」
+  // 也不会因为点一下就把面板点没了。
+  // 必须挂捕获阶段：root 上的鼠标护盾用 stopPropagation 把面板内部事件挡在
+  // shadow 树里，冒泡阶段拿不到；而面板外部（Discord 页面）的按下只在捕获阶段可见。
+  document.addEventListener(
+    'pointerdown',
+    (event) => {
+      if (!state.open || event.button !== 0) return;
+      if (event.composedPath().includes(host)) return;
+      closePanel();
+    },
+    true,
+  );
 
   // 单个数字字符的数值（全角「１」也算 1）；不是单个数字时返回 -1
   function digitValue(text) {
@@ -1535,7 +1622,7 @@
     const pos = digitValue(search.value) - 1;
     if (state.mode !== 'quick' || pos < 0 || pos >= list.length) return false;
     search.value = '';
-    applyPreset(list[pos].index, pos);
+    applyPreset(list[pos].preset.name, pos);
     return true;
   }
 
@@ -1583,6 +1670,12 @@
     state.cursor = 0;
     renderBody();
     search.focus();
+  });
+
+  // 正文 / 附件链接改动时刷新合计字数（只更新那一行提示，不重绘表单）
+  body.addEventListener('input', (event) => {
+    if (state.mode !== 'form') return;
+    if (event.target.matches('[data-field="content"], [data-field="attachments"]')) updateLengthHint();
   });
 
   // 表单里的「分组」下拉：选「➕ 新建分组…」时原地换成文本输入框
